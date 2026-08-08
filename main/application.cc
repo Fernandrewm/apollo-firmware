@@ -14,6 +14,9 @@
 
 #include <driver/gpio.h>
 #include <esp_log.h>
+#ifdef CONFIG_APOLLO_PROTOCOL
+#include <esp_netif_sntp.h>
+#endif
 #include <arpa/inet.h>
 #include <cJSON.h>
 #include <cstring>
@@ -363,6 +366,7 @@ void Application::ActivationTask() {
     // against api.tenclass.net waiting for a device registration that will
     // never happen.
     ESP_LOGI(TAG, "Apollo protocol selected, skipping OTA activation");
+    InitializeSystemTime();
 #endif
 
     // Initialize the protocol
@@ -824,6 +828,26 @@ void Application::HandleStartListeningEvent() {
         SetListeningMode(kListeningModeManualStop);
     }
 }
+
+#ifdef CONFIG_APOLLO_PROTOCOL
+void Application::InitializeSystemTime() {
+    // Fire and forget: the clock is only used for the on-screen display, so
+    // nothing here should delay reaching the idle state.
+    setenv("TZ", CONFIG_APOLLO_TIMEZONE, 1);
+    tzset();
+
+    esp_sntp_config_t sntp_config = ESP_NETIF_SNTP_DEFAULT_CONFIG(CONFIG_APOLLO_NTP_SERVER);
+    sntp_config.start = true;
+    sntp_config.server_from_dhcp = false;
+    auto err = esp_netif_sntp_init(&sntp_config);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "SNTP init failed: %s", esp_err_to_name(err));
+        return;
+    }
+    ESP_LOGI(TAG, "SNTP started against %s (TZ %s)", CONFIG_APOLLO_NTP_SERVER,
+             CONFIG_APOLLO_TIMEZONE);
+}
+#endif
 
 void Application::FinishSpeaking() {
     if (listening_mode_ == kListeningModeManualStop) {

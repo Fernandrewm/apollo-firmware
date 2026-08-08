@@ -40,6 +40,22 @@ config APOLLO_DEVICE_ID
         Agent instance name, which is also the conversation the device joins.
         Falls back to the MAC address when left empty.
 
+config APOLLO_NTP_SERVER
+    string "NTP server"
+    depends on APOLLO_PROTOCOL
+    default "pool.ntp.org"
+    help
+        Skipping the xiaozhi activation also skips the only place the clock was
+        ever set, so the device syncs its own time instead.
+
+config APOLLO_TIMEZONE
+    string "POSIX timezone"
+    depends on APOLLO_PROTOCOL
+    default "<-03>3"
+    help
+        POSIX TZ string used for the on-screen clock. The default is Argentina
+        (UTC-3, no DST). Note the sign convention is inverted: UTC-3 is "3".
+
 config APOLLO_RAW_PCM_UPLINK
     bool "Send microphone audio as raw PCM instead of Opus"
     default y if APOLLO_PROTOCOL

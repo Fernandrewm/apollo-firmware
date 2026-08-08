@@ -165,6 +165,7 @@ private:
     void ContinueWakeWordInvoke(const std::string& wake_word);
     void StartListeningAudio();
     void FinishSpeaking();
+    void InitializeSystemTime();
     void ConfigureWakeWordForListening();
 
     // Activation task (runs in background)
