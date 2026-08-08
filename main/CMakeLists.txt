@@ -396,6 +396,9 @@ elseif(CONFIG_BOARD_TYPE_WAVESHARE_ESP32_S3_TOUCH_LCD_1_85C)
     set(BUILTIN_TEXT_FONT font_noto_sans_basic_16_4)
     set(BUILTIN_ICON_FONT font_material_symbols_16_4)
     set(DEFAULT_EMOJI_COLLECTION noto-color-emoji_64)
+    set(EMOTE_RESOLUTION "360_360")
+    set(APOLLO_ASSETS_STAGING "${CMAKE_BINARY_DIR}/apollo-assets")
+    set(EMOTE_EXTERNAL_PATH "${APOLLO_ASSETS_STAGING}")
 elseif(CONFIG_BOARD_TYPE_WAVESHARE_ESP32_S3_TOUCH_LCD_1_85B)
     set(BOARD_DIR "waveshare/esp32-s3-touch-lcd-1.85b")
     set(BUILTIN_TEXT_FONT font_noto_sans_basic_16_4)
@@ -1163,6 +1166,31 @@ if(CONFIG_BOARD_TYPE_ESP_VOCAT)
         )
     else()
         message(WARNING "esp_emote_assets component not found; ESP-VoCat custom emotes will be skipped")
+    endif()
+endif()
+
+if(CONFIG_BOARD_TYPE_WAVESHARE_ESP32_S3_TOUCH_LCD_1_85C AND CONFIG_USE_EMOTE_MESSAGE_STYLE)
+    find_component_by_pattern("esp_emote_assets" EMOTE_ASSETS_COMPONENT EMOTE_ASSETS_PATH)
+    if(EMOTE_ASSETS_PATH)
+        # Everything but emote.json comes straight from the component; only the
+        # emotion mapping is ours, so idle animations actually loop.
+        file(REMOVE_RECURSE "${APOLLO_ASSETS_STAGING}")
+        file(REMOVE
+            "${CMAKE_BINARY_DIR}/expression_assets.bin"
+            "${CMAKE_BINARY_DIR}/expression_assets.bin.validated"
+        )
+        file(MAKE_DIRECTORY "${APOLLO_ASSETS_STAGING}/360_360")
+        file(MAKE_DIRECTORY "${APOLLO_ASSETS_STAGING}/emoji_large")
+        file(COPY "${EMOTE_ASSETS_PATH}/emoji_large/" DESTINATION "${APOLLO_ASSETS_STAGING}/emoji_large")
+        file(COPY "${EMOTE_ASSETS_PATH}/360_360/layout.json" DESTINATION "${APOLLO_ASSETS_STAGING}/360_360")
+        file(COPY "${EMOTE_ASSETS_PATH}/360_360/config.json" DESTINATION "${APOLLO_ASSETS_STAGING}/360_360")
+        file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/boards/waveshare/esp32-s3-touch-lcd-1.85c/assets/360_360/emote.json"
+             DESTINATION "${APOLLO_ASSETS_STAGING}/360_360")
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+            "${CMAKE_CURRENT_SOURCE_DIR}/boards/waveshare/esp32-s3-touch-lcd-1.85c/assets/360_360/emote.json"
+        )
+    else()
+        message(WARNING "esp_emote_assets not found; Apollo emote mapping will be skipped")
     endif()
 endif()
 

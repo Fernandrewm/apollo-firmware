@@ -354,10 +354,13 @@ void Application::ActivationTask() {
     // HandleActivationDoneEvent reads the version and server time off it.
     ota_ = std::make_unique<Ota>();
 
-#ifndef CONFIG_APOLLO_PROTOCOL
-    // Check for new assets version
+    // Mounts the assets partition as a side effect of first touching the
+    // Assets singleton, so it runs under Apollo too: skipping it left the
+    // emote engine with no animations to play at all. The network path inside
+    // only runs when a download url was explicitly stored.
     CheckAssetsVersion();
 
+#ifndef CONFIG_APOLLO_PROTOCOL
     // Check for new firmware version
     CheckNewVersion();
 #else

@@ -20,14 +20,16 @@
 
 namespace {
 
-// Apollo's face vocabulary is smaller than xiaozhi's emoji set, so each state
-// is pinned to the closest available glyph.
+// Apollo's six states are mapped onto the emote engine's vocabulary, avoiding
+// "neutral" and "idle": both are configured loop=false upstream, so they play
+// once and freeze. An idle desk agent would sit on a still frame, which reads
+// as a crash rather than as calm.
 const char* MapApolloEmotion(const char* apollo_emotion) {
     if (strcmp(apollo_emotion, "curious") == 0) {
-        return "surprised";
+        return "shocked";
     }
     if (strcmp(apollo_emotion, "focused") == 0) {
-        return "confident";
+        return "thinking";
     }
     if (strcmp(apollo_emotion, "questioning") == 0) {
         return "confused";
@@ -36,9 +38,9 @@ const char* MapApolloEmotion(const char* apollo_emotion) {
         return "happy";
     }
     if (strcmp(apollo_emotion, "calm") == 0) {
-        return "relaxed";
+        return "sleepy";
     }
-    return "neutral";
+    return "relaxed";
 }
 
 uint32_t NowMilliseconds() { return (uint32_t)(esp_timer_get_time() / 1000); }
