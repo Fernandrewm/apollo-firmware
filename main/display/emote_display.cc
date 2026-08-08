@@ -221,6 +221,15 @@ void EmoteDisplay::Unlock()
 {
 }
 
+bool EmoteDisplay::SetObjectVisible(const char* name, bool visible)
+{
+    ESP_LOGI(TAG, "SetObjectVisible: %s -> %d", name, visible);
+    if (emote_handle_) {
+        return emote_set_obj_visible(emote_handle_, name, visible) == ESP_OK;
+    }
+    return false;
+}
+
 bool EmoteDisplay::StopAnimDialog()
 {
     ESP_LOGI(TAG, "StopAnimDialog");

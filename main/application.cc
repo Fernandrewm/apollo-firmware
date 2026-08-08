@@ -11,6 +11,9 @@
 #include "text_glyph_payload.h"
 #include "websocket_protocol.h"
 #include "apollo_protocol.h"
+#if CONFIG_USE_EMOTE_MESSAGE_STYLE
+#include "display/emote_display.h"
+#endif
 
 #include <driver/gpio.h>
 #include <esp_log.h>
@@ -22,6 +25,12 @@
 #include <cstring>
 
 #define TAG "Application"
+
+#if defined(CONFIG_APOLLO_PROTOCOL) && defined(CONFIG_USE_EMOTE_MESSAGE_STYLE)
+// Long enough that the idle animation finishes and the face rests before it
+// plays again.
+static constexpr int kIdleBlinkIntervalSeconds = 12;
+#endif
 
 Application::Application() {
     event_group_ = xEventGroupCreate();
@@ -274,6 +283,16 @@ void Application::Run() {
             auto display = Board::GetInstance().GetDisplay();
             display->UpdateStatusBar();
 
+#if defined(CONFIG_APOLLO_PROTOCOL) && defined(CONFIG_USE_EMOTE_MESSAGE_STYLE)
+            // neutral.eaf is one blink, not an idle loop: looping it blinks
+            // nonstop, which reads as a nervous tic. Play it once and replay it
+            // on a human-ish cadence so the face rests in between.
+            if (clock_ticks_ % kIdleBlinkIntervalSeconds == 0 &&
+                GetDeviceState() == kDeviceStateIdle) {
+                display->SetEmotion("neutral");
+            }
+#endif
+
             // Print debug info every 10 seconds
             if (clock_ticks_ % 10 == 0) {
                 SystemInfo::PrintHeapStats();
@@ -437,6 +456,7 @@ void Application::CheckAssetsVersion() {
     assets.Apply();
     display->SetChatMessage("system", "");
     display->SetEmotion("robot_2");
+
 }
 
 void Application::CheckNewVersion() {

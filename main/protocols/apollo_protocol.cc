@@ -40,7 +40,9 @@ const char* MapApolloEmotion(const char* apollo_emotion) {
     if (strcmp(apollo_emotion, "calm") == 0) {
         return "sleepy";
     }
-    return "relaxed";
+    // "neutral" is the resting face: a single blink that the application
+    // replays on a cadence, rather than a loop that never stops blinking.
+    return "neutral";
 }
 
 uint32_t NowMilliseconds() { return (uint32_t)(esp_timer_get_time() / 1000); }

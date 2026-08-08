@@ -1181,13 +1181,17 @@ if(CONFIG_BOARD_TYPE_WAVESHARE_ESP32_S3_TOUCH_LCD_1_85C AND CONFIG_USE_EMOTE_MES
         )
         file(MAKE_DIRECTORY "${APOLLO_ASSETS_STAGING}/360_360")
         file(MAKE_DIRECTORY "${APOLLO_ASSETS_STAGING}/emoji_large")
+        # Artwork and config stay upstream's; the emotion mapping and the layout
+        # are ours (the layout drops the clock the engine paints over the face).
         file(COPY "${EMOTE_ASSETS_PATH}/emoji_large/" DESTINATION "${APOLLO_ASSETS_STAGING}/emoji_large")
-        file(COPY "${EMOTE_ASSETS_PATH}/360_360/layout.json" DESTINATION "${APOLLO_ASSETS_STAGING}/360_360")
         file(COPY "${EMOTE_ASSETS_PATH}/360_360/config.json" DESTINATION "${APOLLO_ASSETS_STAGING}/360_360")
         file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/boards/waveshare/esp32-s3-touch-lcd-1.85c/assets/360_360/emote.json"
              DESTINATION "${APOLLO_ASSETS_STAGING}/360_360")
+        file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/boards/waveshare/esp32-s3-touch-lcd-1.85c/assets/360_360/layout.json"
+             DESTINATION "${APOLLO_ASSETS_STAGING}/360_360")
         set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
             "${CMAKE_CURRENT_SOURCE_DIR}/boards/waveshare/esp32-s3-touch-lcd-1.85c/assets/360_360/emote.json"
+            "${CMAKE_CURRENT_SOURCE_DIR}/boards/waveshare/esp32-s3-touch-lcd-1.85c/assets/360_360/layout.json"
         )
     else()
         message(WARNING "esp_emote_assets not found; Apollo emote mapping will be skipped")

@@ -110,19 +110,19 @@
     {
         "emote": "neutral",
         "src": "neutral.eaf",
-        "loop": true,
+        "loop": false,
         "fps": 20
     },
     {
         "emote": "idle",
         "src": "neutral.eaf",
-        "loop": true,
+        "loop": false,
         "fps": 20
     },
     {
         "emote": "robot_2",
         "src": "neutral.eaf",
-        "loop": true,
+        "loop": false,
         "fps": 20
     }
 ]

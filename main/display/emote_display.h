@@ -23,6 +23,9 @@ public:
     virtual void SetPowerSaveMode(bool on) override;
     virtual void SetPreviewImage(const void* image);
 
+    // Show or hide a named object from the layout, e.g. "clock_label".
+    bool SetObjectVisible(const char* name, bool visible);
+
     bool StopAnimDialog();
     bool InsertAnimDialog(const char* emoji_name, uint32_t duration_ms);
 
