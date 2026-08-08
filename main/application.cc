@@ -10,6 +10,7 @@
 #include "system_info.h"
 #include "text_glyph_payload.h"
 #include "websocket_protocol.h"
+#include "apollo_protocol.h"
 
 #include <driver/gpio.h>
 #include <esp_log.h>
@@ -499,6 +500,11 @@ void Application::InitializeProtocol() {
 
     display->SetStatus(Lang::Strings::LOADING_PROTOCOL);
 
+#ifdef CONFIG_APOLLO_PROTOCOL
+    // Apollo is configured from NVS, not from an OTA config response, so it
+    // wins outright rather than participating in the checks below.
+    protocol_ = std::make_unique<ApolloProtocol>();
+#else
     if (ota_->HasMqttConfig()) {
         protocol_ = std::make_unique<MqttProtocol>();
     } else if (ota_->HasWebsocketConfig()) {
@@ -507,6 +513,7 @@ void Application::InitializeProtocol() {
         ESP_LOGW(TAG, "No protocol specified in the OTA config, using MQTT");
         protocol_ = std::make_unique<MqttProtocol>();
     }
+#endif
 
     protocol_->OnConnected([this]() { DismissAlert(); });
 

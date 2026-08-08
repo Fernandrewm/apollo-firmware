@@ -1,5 +1,26 @@
 menu "Xiaozhi Assistant"
 
+config APOLLO_PROTOCOL
+    bool "Use the Apollo desk agent protocol"
+    default n
+    help
+        Talk to an Apollo backend (a Cloudflare Worker running the agents SDK)
+        instead of a xiaozhi server. The connection url, auth token and device
+        id are read from the NVS namespace "apollo" rather than from an OTA
+        config response, so no OTA endpoint is required.
+
+        Apollo carries raw PCM in both directions, so this also selects the
+        PCM uplink below.
+
+config APOLLO_RAW_PCM_UPLINK
+    bool "Send microphone audio as raw PCM instead of Opus"
+    default y if APOLLO_PROTOCOL
+    default n
+    help
+        Skips the Opus encoder and pushes 16 kHz mono PCM frames straight to
+        the send queue. Costs far more bandwidth, but means the server needs no
+        Opus decoder, which matters when it runs somewhere without one.
+
 config OTA_URL
     string "Default OTA URL"
     default "https://api.tenclass.net/xiaozhi/ota/"

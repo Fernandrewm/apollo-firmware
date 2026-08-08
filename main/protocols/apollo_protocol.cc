@@ -1,0 +1,367 @@
+#include "apollo_protocol.h"
+#include "application.h"
+#include "board.h"
+#include "settings.h"
+#include "system_info.h"
+
+#include <esp_log.h>
+#include <esp_timer.h>
+#include <cJSON.h>
+#include <cstring>
+#include "assets/lang_config.h"
+
+#define TAG "Apollo"
+
+// Apollo advertises the sample rate on every tts_start; this is only the value
+// used before the first one arrives.
+#define APOLLO_DEFAULT_TTS_SAMPLE_RATE 24000
+#define APOLLO_UPLINK_SAMPLE_RATE 16000
+#define APOLLO_FRAME_DURATION_MS 60
+
+namespace {
+
+// Apollo's face vocabulary is smaller than xiaozhi's emoji set, so each state
+// is pinned to the closest available glyph.
+const char* MapApolloEmotion(const char* apollo_emotion) {
+    if (strcmp(apollo_emotion, "curious") == 0) {
+        return "surprised";
+    }
+    if (strcmp(apollo_emotion, "focused") == 0) {
+        return "confident";
+    }
+    if (strcmp(apollo_emotion, "questioning") == 0) {
+        return "confused";
+    }
+    if (strcmp(apollo_emotion, "talking") == 0) {
+        return "happy";
+    }
+    if (strcmp(apollo_emotion, "calm") == 0) {
+        return "relaxed";
+    }
+    return "neutral";
+}
+
+uint32_t NowMilliseconds() { return (uint32_t)(esp_timer_get_time() / 1000); }
+
+}  // namespace
+
+ApolloProtocol::ApolloProtocol() {}
+
+ApolloProtocol::~ApolloProtocol() {}
+
+bool ApolloProtocol::Start() {
+    // Like the websocket protocol, only connect when a session actually starts.
+    return true;
+}
+
+std::string ApolloProtocol::BuildConnectionUrl(const std::string& base_url,
+                                               const std::string& device_id,
+                                               const std::string& token) const {
+    std::string url = base_url;
+    while (!url.empty() && url.back() == '/') {
+        url.pop_back();
+    }
+    // The `agents` SDK routes on /agents/<kebab-cased class>/<instance name>,
+    // and authenticates from a token query parameter rather than a header.
+    url += "/agents/apollo/";
+    url += device_id;
+    url += "?token=";
+    url += token;
+    return url;
+}
+
+bool ApolloProtocol::SendText(const std::string& text) {
+    if (websocket_ == nullptr || !websocket_->IsConnected()) {
+        return false;
+    }
+    if (!websocket_->Send(text)) {
+        ESP_LOGE(TAG, "Failed to send text: %s", text.c_str());
+        SetError(Lang::Strings::SERVER_ERROR);
+        return false;
+    }
+    return true;
+}
+
+bool ApolloProtocol::SendEvent(const char* type) {
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "type", type);
+    cJSON_AddNumberToObject(root, "ts", NowMilliseconds());
+    auto serialized = cJSON_PrintUnformatted(root);
+    std::string message(serialized);
+    cJSON_free(serialized);
+    cJSON_Delete(root);
+    return SendText(message);
+}
+
+bool ApolloProtocol::SendAudio(std::unique_ptr<AudioStreamPacket> packet) {
+    if (websocket_ == nullptr || !websocket_->IsConnected()) {
+        return false;
+    }
+    // Raw PCM, no framing: the server concatenates the binary frames of an
+    // utterance and wraps them in a RIFF header before transcription.
+    return websocket_->Send((const char*)packet->payload.data(), packet->payload.size(), true);
+}
+
+void ApolloProtocol::SendStartListening(ListeningMode mode) {
+    // Apollo distinguishes a held button from a wake word, and resets its audio
+    // buffer on either.
+    SendEvent(mode == kListeningModeManualStop ? "hold_start" : "wake");
+}
+
+void ApolloProtocol::SendStopListening() { SendEvent("hold_end"); }
+
+void ApolloProtocol::SendWakeWordDetected(const std::string& wake_word) {
+    // Apollo has no voice-print step, so the wake word itself carries no extra
+    // information beyond "start listening", which SendStartListening covers.
+    (void)wake_word;
+}
+
+void ApolloProtocol::SendAbortSpeaking(AbortReason reason) {
+    // Apollo's schema has no abort message: a turn runs to completion server
+    // side. Stop feeding the speaker locally and drop the rest of the run.
+    (void)reason;
+    ESP_LOGW(TAG, "Abort requested but Apollo has no abort message; dropping local playback");
+    FinishTtsRun();
+}
+
+bool ApolloProtocol::IsAudioChannelOpened() const {
+    return websocket_ != nullptr && websocket_->IsConnected() && !error_occurred_ && !IsTimeout();
+}
+
+void ApolloProtocol::CloseAudioChannel(bool send_goodbye) {
+    (void)send_goodbye;
+    tts_run_active_ = false;
+    tts_expected_bytes_ = 0;
+    tts_received_bytes_ = 0;
+    websocket_.reset();
+}
+
+void ApolloProtocol::EmitTranslatedJson(cJSON* root) {
+    if (on_incoming_json_ != nullptr) {
+        on_incoming_json_(root);
+    }
+    cJSON_Delete(root);
+}
+
+void ApolloProtocol::EmitTtsState(const char* state, const char* text) {
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "type", "tts");
+    cJSON_AddStringToObject(root, "state", state);
+    if (text != nullptr) {
+        cJSON_AddStringToObject(root, "text", text);
+    }
+    EmitTranslatedJson(root);
+}
+
+void ApolloProtocol::EmitEmotion(const char* emotion) {
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "type", "llm");
+    cJSON_AddStringToObject(root, "emotion", emotion);
+    cJSON_AddStringToObject(root, "text", "");
+    EmitTranslatedJson(root);
+}
+
+void ApolloProtocol::EmitAlert(const char* status, const char* message, const char* emotion) {
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "type", "alert");
+    cJSON_AddStringToObject(root, "status", status);
+    cJSON_AddStringToObject(root, "message", message);
+    cJSON_AddStringToObject(root, "emotion", emotion);
+    EmitTranslatedJson(root);
+}
+
+void ApolloProtocol::HandleUiState(const cJSON* root) {
+    auto emotion = cJSON_GetObjectItem(root, "emotion");
+    if (cJSON_IsString(emotion)) {
+        EmitEmotion(MapApolloEmotion(emotion->valuestring));
+    }
+
+    // Apollo's caption is whatever the agent is saying or thinking about, which
+    // is what xiaozhi renders from a sentence_start.
+    auto caption = cJSON_GetObjectItem(root, "caption");
+    if (cJSON_IsString(caption) && strlen(caption->valuestring) > 0) {
+        EmitTtsState("sentence_start", caption->valuestring);
+    }
+}
+
+void ApolloProtocol::HandleTtsStart(const cJSON* root) {
+    auto bytes = cJSON_GetObjectItem(root, "bytes");
+    auto sample_rate = cJSON_GetObjectItem(root, "sampleRate");
+    auto format = cJSON_GetObjectItem(root, "format");
+
+    if (cJSON_IsString(format) && strcmp(format->valuestring, "pcm") != 0) {
+        // Nothing on the device can decode mp3, so a non-pcm run would only
+        // produce noise. Refuse it loudly instead.
+        ESP_LOGE(TAG, "Unsupported tts format '%s', expected pcm", format->valuestring);
+        SetError(Lang::Strings::SERVER_ERROR);
+        return;
+    }
+
+    server_sample_rate_ =
+        cJSON_IsNumber(sample_rate) ? sample_rate->valueint : APOLLO_DEFAULT_TTS_SAMPLE_RATE;
+    server_frame_duration_ = APOLLO_FRAME_DURATION_MS;
+    tts_expected_bytes_ = cJSON_IsNumber(bytes) ? (uint32_t)bytes->valuedouble : 0;
+    tts_received_bytes_ = 0;
+    tts_run_active_ = tts_expected_bytes_ > 0;
+
+    ESP_LOGI(TAG, "TTS run starting: %lu bytes at %d Hz", (unsigned long)tts_expected_bytes_,
+             server_sample_rate_);
+    EmitTtsState("start", nullptr);
+
+    if (!tts_run_active_) {
+        // An empty run still has to be closed or Application would sit in the
+        // speaking state forever.
+        EmitTtsState("stop", nullptr);
+    }
+}
+
+void ApolloProtocol::FinishTtsRun() {
+    if (!tts_run_active_) {
+        return;
+    }
+    tts_run_active_ = false;
+    tts_expected_bytes_ = 0;
+    tts_received_bytes_ = 0;
+    EmitTtsState("stop", nullptr);
+}
+
+void ApolloProtocol::HandleIncomingAudio(const char* data, size_t len) {
+    if (on_incoming_audio_ == nullptr) {
+        return;
+    }
+
+    auto payload = (const uint8_t*)data;
+    on_incoming_audio_(std::make_unique<AudioStreamPacket>(
+        AudioStreamPacket{.sample_rate = server_sample_rate_,
+                          .frame_duration = server_frame_duration_,
+                          .timestamp = 0,
+                          .payload = std::vector<uint8_t>(payload, payload + len)}));
+
+    if (!tts_run_active_) {
+        return;
+    }
+    tts_received_bytes_ += len;
+    if (tts_received_bytes_ >= tts_expected_bytes_) {
+        FinishTtsRun();
+    }
+}
+
+void ApolloProtocol::HandleIncomingJson(const char* data, size_t len) {
+    auto root = cJSON_ParseWithLength(data, len);
+    if (root == nullptr) {
+        ESP_LOGE(TAG, "Failed to parse message: %s", std::string(data, len).c_str());
+        return;
+    }
+
+    auto type = cJSON_GetObjectItem(root, "type");
+    if (!cJSON_IsString(type)) {
+        cJSON_Delete(root);
+        return;
+    }
+
+    if (strcmp(type->valuestring, "ui_state") == 0) {
+        HandleUiState(root);
+    } else if (strcmp(type->valuestring, "tts_start") == 0) {
+        HandleTtsStart(root);
+    } else if (strcmp(type->valuestring, "error") == 0) {
+        auto message = cJSON_GetObjectItem(root, "message");
+        EmitAlert("Error", cJSON_IsString(message) ? message->valuestring : "Error", "sad");
+    } else if (strcmp(type->valuestring, "reminder") == 0) {
+        auto message = cJSON_GetObjectItem(root, "message");
+        if (cJSON_IsString(message)) {
+            EmitAlert("Recordatorio", message->valuestring, "neutral");
+        }
+    } else if (strcmp(type->valuestring, "background_result") == 0) {
+        auto summary = cJSON_GetObjectItem(root, "summary");
+        if (cJSON_IsString(summary)) {
+            EmitAlert("Listo", summary->valuestring, "happy");
+        }
+    } else if (strcmp(type->valuestring, "confirm_request") == 0) {
+        auto summary = cJSON_GetObjectItem(root, "summary");
+        if (cJSON_IsString(summary)) {
+            EmitAlert("Confirmar", summary->valuestring, "confused");
+        }
+    } else {
+        // `dashboard` has no UI yet, and the agents SDK injects its own
+        // cf_agent_state / cf_agent_mcp_servers traffic that is not part of
+        // Apollo's protocol at all. Both are ignored on purpose.
+        ESP_LOGD(TAG, "Ignoring message type: %s", type->valuestring);
+    }
+
+    cJSON_Delete(root);
+}
+
+bool ApolloProtocol::OpenAudioChannel() {
+    Settings settings("apollo", false);
+    std::string base_url = settings.GetString("url");
+    std::string token = settings.GetString("token");
+    std::string device_id = settings.GetString("device_id");
+
+    if (base_url.empty()) {
+        ESP_LOGE(TAG, "No Apollo url configured in NVS namespace 'apollo'");
+        SetError(Lang::Strings::SERVER_NOT_FOUND);
+        return false;
+    }
+    if (device_id.empty()) {
+        device_id = SystemInfo::GetMacAddress();
+    }
+
+    error_occurred_ = false;
+    tts_run_active_ = false;
+    tts_expected_bytes_ = 0;
+    tts_received_bytes_ = 0;
+    server_sample_rate_ = APOLLO_DEFAULT_TTS_SAMPLE_RATE;
+    server_frame_duration_ = APOLLO_FRAME_DURATION_MS;
+
+    auto network = Board::GetInstance().GetNetwork();
+    websocket_ = network->CreateWebSocket(1);
+    if (websocket_ == nullptr) {
+        ESP_LOGE(TAG, "Failed to create websocket");
+        return false;
+    }
+
+    websocket_->OnData([this](const char* data, size_t len, bool binary) {
+        if (binary) {
+            HandleIncomingAudio(data, len);
+        } else {
+            HandleIncomingJson(data, len);
+        }
+        last_incoming_time_ = std::chrono::steady_clock::now();
+    });
+
+    websocket_->OnDisconnected([this]() {
+        ESP_LOGI(TAG, "Apollo websocket disconnected");
+        if (on_audio_channel_closed_ != nullptr) {
+            on_audio_channel_closed_();
+        }
+    });
+
+    auto url = BuildConnectionUrl(base_url, device_id, token);
+    ESP_LOGI(TAG, "Connecting to Apollo as device '%s'", device_id.c_str());
+    if (!websocket_->Connect(url.c_str())) {
+        ESP_LOGE(TAG, "Failed to connect, code=%d", websocket_->GetLastError());
+        SetError(Lang::Strings::SERVER_NOT_CONNECTED);
+        return false;
+    }
+
+    // Apollo answers a hello with a ui_state push rather than a hello of its
+    // own, so there is no handshake to wait for: the channel is usable as soon
+    // as the socket is up.
+    cJSON* hello = cJSON_CreateObject();
+    cJSON_AddStringToObject(hello, "type", "hello");
+    cJSON_AddStringToObject(hello, "deviceId", device_id.c_str());
+    cJSON_AddNumberToObject(hello, "ts", NowMilliseconds());
+    auto serialized = cJSON_PrintUnformatted(hello);
+    std::string hello_message(serialized);
+    cJSON_free(serialized);
+    cJSON_Delete(hello);
+
+    if (!SendText(hello_message)) {
+        return false;
+    }
+
+    if (on_audio_channel_opened_ != nullptr) {
+        on_audio_channel_opened_();
+    }
+    return true;
+}
