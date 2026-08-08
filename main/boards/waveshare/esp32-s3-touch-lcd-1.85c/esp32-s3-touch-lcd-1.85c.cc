@@ -355,6 +355,29 @@ private:
     }
 
     void InitializeButtons() {
+#ifdef CONFIG_APOLLO_PROTOCOL
+        // Apollo is push-to-talk: its protocol is built around hold_start and
+        // hold_end, and holding the button is also the only way to bound an
+        // utterance while the wake word model (which supplies the VAD that
+        // auto-stop mode relies on) is unavailable.
+        boot_button_.OnPressDown([this]() {
+            auto& app = Application::GetInstance();
+            // Deliberately inert while starting: a press in that window used to
+            // drop the device into wifi config mode, which is a surprising way
+            // to lose a working setup.
+            if (app.GetDeviceState() == kDeviceStateStarting) {
+                return;
+            }
+            app.StartListening();
+        });
+
+        boot_button_.OnPressUp([this]() { Application::GetInstance().StopListening(); });
+
+        // Wifi config stays reachable, but not behind a long press: holding the
+        // button *is* the talk gesture, so a long press fires on every normal
+        // use. Three clicks cannot be triggered by accident that way.
+        boot_button_.OnMultipleClick([this]() { EnterWifiConfigMode(); }, 3);
+#else
         boot_button_.OnClick([this]() {
             auto& app = Application::GetInstance();
             if (app.GetDeviceState() == kDeviceStateStarting) {
@@ -363,6 +386,7 @@ private:
             }
             app.ToggleChatState();
         });
+#endif
     }
 
 public:

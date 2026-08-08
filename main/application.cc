@@ -210,6 +210,14 @@ void Application::Run() {
                 pending_listening_start_ = false;
                 StartListeningAudio();
             }
+
+            // Deferred end of speech: the reply had finished arriving long
+            // before it finished playing.
+            if (pending_speech_stop_ && GetDeviceState() == kDeviceStateSpeaking &&
+                audio_service_.IsPlaybackIdle()) {
+                pending_speech_stop_ = false;
+                FinishSpeaking();
+            }
         }
 
         if (bits & MAIN_EVENT_TOGGLE_CHAT) {
@@ -339,14 +347,23 @@ void Application::HandleActivationDoneEvent() {
 }
 
 void Application::ActivationTask() {
-    // Create OTA object for activation process
+    // Create OTA object for activation process. Still constructed under Apollo:
+    // HandleActivationDoneEvent reads the version and server time off it.
     ota_ = std::make_unique<Ota>();
 
+#ifndef CONFIG_APOLLO_PROTOCOL
     // Check for new assets version
     CheckAssetsVersion();
 
     // Check for new firmware version
     CheckNewVersion();
+#else
+    // Apollo is configured locally and has no activation service, so the
+    // xiaozhi handshake is skipped entirely: running it would block here
+    // against api.tenclass.net waiting for a device registration that will
+    // never happen.
+    ESP_LOGI(TAG, "Apollo protocol selected, skipping OTA activation");
+#endif
 
     // Initialize the protocol
     InitializeProtocol();
@@ -566,13 +583,21 @@ void Application::InitializeProtocol() {
                 });
             } else if (strcmp(state->valuestring, "stop") == 0) {
                 Schedule([this]() {
-                    if (GetDeviceState() == kDeviceStateSpeaking) {
-                        if (listening_mode_ == kListeningModeManualStop) {
-                            SetDeviceState(kDeviceStateIdle);
-                        } else {
-                            SetDeviceState(kDeviceStateListening);
-                        }
+                    if (GetDeviceState() != kDeviceStateSpeaking) {
+                        return;
                     }
+#ifdef CONFIG_APOLLO_PROTOCOL
+                    // Apollo pushes the whole reply as fast as the link allows,
+                    // so "stop" means "that was the last byte", not "playback is
+                    // over" — a 7 second reply arrives in about one. Leaving
+                    // speaking here would drop the face back to idle mid
+                    // sentence, so wait for the playback queue to drain.
+                    if (!audio_service_.IsPlaybackIdle()) {
+                        pending_speech_stop_ = true;
+                        return;
+                    }
+#endif
+                    FinishSpeaking();
                 });
             } else if (strcmp(state->valuestring, "sentence_start") == 0) {
                 auto text = cJSON_GetObjectItem(root, "text");
@@ -797,6 +822,14 @@ void Application::HandleStartListeningEvent() {
     } else if (state == kDeviceStateSpeaking) {
         AbortSpeaking(kAbortReasonNone);
         SetListeningMode(kListeningModeManualStop);
+    }
+}
+
+void Application::FinishSpeaking() {
+    if (listening_mode_ == kListeningModeManualStop) {
+        SetDeviceState(kDeviceStateIdle);
+    } else {
+        SetDeviceState(kDeviceStateListening);
     }
 }
 
