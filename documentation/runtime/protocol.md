@@ -1,0 +1,41 @@
+# Protocol
+
+The device speaks Apollo's JSON-over-websocket dialect, implemented in `main/protocols/apollo_protocol.*`. The server-side contract (Zod schemas) lives in the main repo; this chapter covers the device's half. The upstream MQTT and websocket protocols were removed from this fork.
+
+## Connection
+
+The URL is built as `<base>/agents/apollo/<device_id>?token=<token>` — the agents SDK routes on path and authenticates from the query parameter. The channel opens lazily when a session starts, not at boot.
+
+## Device → server
+
+| Type | Sent when |
+|------|-----------|
+| `hold_start` / `hold_end` | Push-to-talk press and release |
+| `wake` | Wake word detected |
+| `gesture` | `tap`, `double_tap`, `swipe_left`, `swipe_right` |
+| `confirm` | A pending confirmation captures the next gesture: tap accepts, anything else declines |
+| `abort` | User interrupts playback |
+
+Utterance audio rides as raw binary frames (PCM, no framing): the server concatenates them and wraps a RIFF header before transcription.
+
+## Server → device
+
+| Type | Handled by |
+|------|-----------|
+| `ui_state` | Face emotion (mapped to the emote vocabulary), accent ring color, caption |
+| `tts_start` | Announces byte total and sample rate of the PCM run |
+| `tts_aborted` | Closes a run whose bytes will never arrive |
+| `confirm_request` | Shows an alert and arms the next-gesture capture |
+| `error` / `reminder` / `background_result` | Alerts with matching face |
+
+Reply audio arrives as headerless PCM binary frames and bypasses the Opus decoder (`AudioStreamPacket.pcm`).
+
+## Design notes
+
+- Emotions are translated in `MapApolloEmotion`: Apollo's vocabulary → emote asset names, avoiding non-looping assets that freeze the face.
+- `dashboard` and the agents SDK's own `cf_agent_*` traffic are ignored on purpose.
+- Turn audio byte counts are logged on `hold_end` — the difference between "the mic is deaf" and "the audio never left the device".
+
+## Navigation
+
+Prev: [Architecture](../introduction/architecture.md) · Next: [Audio](audio.md)
