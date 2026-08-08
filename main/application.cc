@@ -6,11 +6,9 @@
 #include "board.h"
 #include "display.h"
 #include "mcp_server.h"
-#include "mqtt_protocol.h"
 #include "settings.h"
 #include "system_info.h"
 #include "text_glyph_payload.h"
-#include "websocket_protocol.h"
 #include "apollo_protocol.h"
 #if CONFIG_USE_EMOTE_MESSAGE_STYLE
 #include "display/emote_display.h"
@@ -587,20 +585,10 @@ void Application::InitializeProtocol() {
 
     display->SetStatus(Lang::Strings::LOADING_PROTOCOL);
 
-#ifdef CONFIG_APOLLO_PROTOCOL
-    // Apollo is configured from NVS, not from an OTA config response, so it
-    // wins outright rather than participating in the checks below.
+    // Apollo is configured from NVS, not from an OTA config response. The
+    // upstream MQTT/websocket protocols are gone from this fork: Apollo's
+    // dialect is the only one the device speaks.
     protocol_ = std::make_unique<ApolloProtocol>();
-#else
-    if (ota_->HasMqttConfig()) {
-        protocol_ = std::make_unique<MqttProtocol>();
-    } else if (ota_->HasWebsocketConfig()) {
-        protocol_ = std::make_unique<WebsocketProtocol>();
-    } else {
-        ESP_LOGW(TAG, "No protocol specified in the OTA config, using MQTT");
-        protocol_ = std::make_unique<MqttProtocol>();
-    }
-#endif
 
     protocol_->OnConnected([this]() { DismissAlert(); });
 
