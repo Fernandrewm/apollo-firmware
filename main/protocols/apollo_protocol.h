@@ -52,6 +52,7 @@ private:
     // While the server is waiting on a confirmation, gestures answer it
     // instead of doing their usual job.
     bool confirm_pending_ = false;
+    size_t turn_audio_bytes_ = 0;  // PCM actually sent since the turn started
 
     bool SendText(const std::string& text) override;
     bool SendEvent(const char* type);
@@ -65,6 +66,7 @@ private:
     void EmitTranslatedJson(cJSON* root);
     void EmitTtsState(const char* state, const char* text);
     void EmitEmotion(const char* emotion);
+    void EmitAccentColor(const char* color);
     void EmitAlert(const char* status, const char* message, const char* emotion);
 
     std::string BuildConnectionUrl(const std::string& base_url, const std::string& device_id,

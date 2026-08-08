@@ -1,6 +1,8 @@
 #include "emote_display.h"
 
 // Standard C++ headers
+#include <atomic>
+#include <cmath>
 #include <cstring>
 #include <memory>
 #include <unordered_map>
@@ -58,11 +60,60 @@ static bool OnFlushIoReady(const esp_lcd_panel_io_handle_t panel_io,
     return true;
 }
 
+// Accent ring state. The emote engine owns every pixel of the frame, so the
+// only place an overlay survives all animations is the stripe it is about to
+// flush. Stored pre-byte-swapped because the engine renders with swap=true.
+// White (0xFFFF) is the resting color until the server names the active mode.
+static std::atomic<uint16_t> s_accent_ring_color{0xFFFF};
+static int s_display_width = 0;
+static int s_display_height = 0;
+constexpr float kAccentRingThickness = 8.0f;
+
+static void OverlayAccentRing(int x_start, int y_start, int x_end, int y_end, uint16_t* pixels)
+{
+    if (s_display_width == 0 || s_display_height == 0) {
+        return;
+    }
+    const uint16_t color = s_accent_ring_color.load(std::memory_order_relaxed);
+    const float cx = (s_display_width - 1) / 2.0f;
+    const float cy = (s_display_height - 1) / 2.0f;
+    const float outer_r = std::min(s_display_width, s_display_height) / 2.0f;
+    const float inner_r = outer_r - kAccentRingThickness;
+    const int stride = x_end - x_start;
+
+    for (int y = y_start; y < y_end; ++y) {
+        const float dy = y - cy;
+        const float outer_sq = outer_r * outer_r - dy * dy;
+        if (outer_sq <= 0.0f) {
+            continue;
+        }
+        const float outer_half = sqrtf(outer_sq);
+        const float inner_sq = inner_r * inner_r - dy * dy;
+        const float inner_half = inner_sq > 0.0f ? sqrtf(inner_sq) : 0.0f;
+        uint16_t* row = pixels + (size_t)(y - y_start) * stride;
+        // Two arcs per row: [cx-outer, cx-inner] and [cx+inner, cx+outer].
+        // Near the vertical extremes inner_half is 0 and they merge into one.
+        const int spans[2][2] = {
+            {(int)ceilf(cx - outer_half), (int)floorf(cx - inner_half)},
+            {(int)ceilf(cx + inner_half), (int)floorf(cx + outer_half)},
+        };
+        for (const auto& span : spans) {
+            const int from = std::max(span[0], x_start);
+            const int to = std::min(span[1], x_end - 1);
+            for (int x = from; x <= to; ++x) {
+                row[x - x_start] = color;
+            }
+        }
+    }
+}
+
 // Flush callback for emote
 static void OnFlushCallback(int x_start, int y_start, int x_end, int y_end, const void* data, emote_handle_t handle)
 {
     esp_lcd_panel_handle_t panel = (esp_lcd_panel_handle_t)emote_get_user_data(handle);
     if (panel != nullptr) {
+        OverlayAccentRing(x_start, y_start, x_end, y_end,
+                          const_cast<uint16_t*>(static_cast<const uint16_t*>(data)));
         esp_lcd_panel_draw_bitmap(panel, x_start, y_start, x_end, y_end, data);
     }
 }
@@ -118,6 +169,8 @@ static emote_handle_t InitializeEmote(const esp_lcd_panel_handle_t panel, const 
 EmoteDisplay::EmoteDisplay(const esp_lcd_panel_handle_t panel, const esp_lcd_panel_io_handle_t panel_io,
                            const int width, const int height)
 {
+    s_display_width = width;
+    s_display_height = height;
     emote_handle_ = InitializeEmote(panel, width, height);
 
     const esp_lcd_panel_io_callbacks_t cbs = {
@@ -197,6 +250,41 @@ void EmoteDisplay::SetPowerSaveMode(bool on)
     if (!emote_handle_) {
         return;
     }
+    // Was a stub. With the backlight off the animation is invisible but still
+    // decodes frames at 20 fps, so stop it: that is the part that costs cpu.
+    emote_set_anim_visible(emote_handle_, !on);
+}
+
+void EmoteDisplay::SetAccentColor(const char* const color)
+{
+    ESP_LOGI(TAG, "SetAccentColor: %s", color ? color : "(null)");
+    const char* hex = color;
+    if (hex == nullptr) {
+        return;
+    }
+    if (*hex == '#') {
+        ++hex;
+    }
+    if (strlen(hex) != 6) {
+        ESP_LOGW(TAG, "Accent color must be #RRGGBB, got '%s'", color);
+        return;
+    }
+    const uint32_t rgb = strtoul(hex, nullptr, 16);
+    const uint16_t rgb565 = (uint16_t)((((rgb >> 19) & 0x1F) << 11) |
+                                       (((rgb >> 10) & 0x3F) << 5) |
+                                       ((rgb >> 3) & 0x1F));
+    // The engine renders byte-swapped (swap=true), so the overlay color has to
+    // match what is already in the flush buffer.
+    const uint16_t swapped = (uint16_t)((rgb565 >> 8) | (rgb565 << 8));
+    if (s_accent_ring_color.exchange(swapped, std::memory_order_relaxed) == swapped) {
+        // Same color as before: every ui_state repeats the accent, and only an
+        // actual change is worth a full redraw.
+        return;
+    }
+    // The engine only re-flushes dirty areas and the screen border belongs to
+    // none of them, so a color change has to invalidate everything or the ring
+    // keeps its old color until the next full redraw.
+    RefreshAll();
 }
 
 void EmoteDisplay::SetPreviewImage(const void* image)

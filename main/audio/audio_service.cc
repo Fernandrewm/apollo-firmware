@@ -387,17 +387,16 @@ void AudioService::OpusCodecTask() {
 
             SetDecodeSampleRate(packet->sample_rate, packet->frame_duration);
             bool decoded = false;
-#ifdef CONFIG_APOLLO_PROTOCOL
-            /* Apollo streams the reply as raw little-endian PCM chunks, so there is
-             * nothing to decode: the payload is already what the speaker wants. */
-            {
+            if (packet->pcm) {
+                /* Apollo streams the reply as raw little-endian PCM chunks, so there
+                 * is nothing to decode: the payload is already what the speaker
+                 * wants. Local sound effects still arrive as Opus and take the
+                 * decoder branch below. */
                 auto sample_count = packet->payload.size() / sizeof(int16_t);
                 task->pcm.resize(sample_count);
                 memcpy(task->pcm.data(), packet->payload.data(), sample_count * sizeof(int16_t));
                 decoded = sample_count > 0;
-            }
-#else
-            if (opus_decoder_ != nullptr) {
+            } else if (opus_decoder_ != nullptr) {
                 task->pcm.resize(decoder_frame_size_);
                 esp_audio_dec_in_raw_t raw = {
                     .buffer = (uint8_t *)(packet->payload.data()),
@@ -423,7 +422,6 @@ void AudioService::OpusCodecTask() {
             } else {
                 ESP_LOGE(TAG, "Audio decoder is not configured");
             }
-#endif
             /* Shared by both paths: whatever produced the pcm, it still has to land
              * at the codec's output rate. */
             if (decoded && decoder_sample_rate_ != codec_->output_sample_rate() &&

@@ -12,6 +12,10 @@ struct AudioStreamPacket {
     int frame_duration = 0;
     uint32_t timestamp = 0;
     std::vector<uint8_t> payload;
+    // Apollo streams TTS as headerless PCM, but local sound effects are still
+    // Opus packets from the ogg demuxer. The decode queue carries both, so the
+    // payload kind has to travel with the packet, not with a build flag.
+    bool pcm = false;
 };
 
 struct BinaryProtocol2 {

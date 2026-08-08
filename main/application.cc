@@ -1,6 +1,7 @@
 #include "application.h"
 #include "assets.h"
 #include "assets/lang_config.h"
+#include "assets/sound_variants.h"
 #include "audio_codec.h"
 #include "board.h"
 #include "display.h"
@@ -30,6 +31,18 @@
 // Long enough that the idle animation finishes and the face rests before it
 // plays again.
 static constexpr int kIdleBlinkIntervalSeconds = 12;
+#endif
+
+#ifdef CONFIG_APOLLO_PROTOCOL
+// The backlight is the single biggest draw on this board, so it goes first.
+static constexpr int kScreenSleepAfterSeconds = 60;
+// Slow enough that a server that keeps hanging up does not turn into a
+// reconnect loop, quick enough that the channel is ready when a hand arrives.
+static constexpr int kChannelReopenIntervalSeconds = 10;
+// Draining the encoder after the finger lifts: a few short waits rather than one
+// long one, so a quiet tail costs nothing but a real one still gets through.
+static constexpr int kListenFlushAttempts = 6;
+static constexpr int kListenFlushWaitMs = 40;
 #endif
 
 Application::Application() {
@@ -283,11 +296,41 @@ void Application::Run() {
             auto display = Board::GetInstance().GetDisplay();
             display->UpdateStatusBar();
 
+#ifdef CONFIG_APOLLO_PROTOCOL
+            if (GetDeviceState() == kDeviceStateIdle) {
+                idle_seconds_++;
+                if (idle_seconds_ >= kScreenSleepAfterSeconds) {
+                    SleepScreen();
+                }
+                // Opening the channel on demand costs about three seconds, which
+                // is longer than a press-and-hold lasts: the turn would be over
+                // before the first sample was recorded. Reconnect while idle so
+                // the press finds the channel already open.
+                if (protocol_ != nullptr && !protocol_->IsAudioChannelOpened() &&
+                    clock_ticks_ - last_channel_attempt_ticks_ >= kChannelReopenIntervalSeconds) {
+                    last_channel_attempt_ticks_ = clock_ticks_;
+                    Schedule([this]() {
+                        if (GetDeviceState() != kDeviceStateIdle || protocol_ == nullptr ||
+                            protocol_->IsAudioChannelOpened()) {
+                            return;
+                        }
+                        if (!protocol_->OpenAudioChannel()) {
+                            ESP_LOGW(TAG, "Idle channel reopen failed; retrying later");
+                        }
+                    });
+                }
+            } else {
+                // Anything but idle is the device working for the user.
+                NoteUserActivity();
+            }
+#endif
+
 #if defined(CONFIG_APOLLO_PROTOCOL) && defined(CONFIG_USE_EMOTE_MESSAGE_STYLE)
             // neutral.eaf is one blink, not an idle loop: looping it blinks
             // nonstop, which reads as a nervous tic. Play it once and replay it
-            // on a human-ish cadence so the face rests in between.
-            if (clock_ticks_ % kIdleBlinkIntervalSeconds == 0 &&
+            // on a human-ish cadence so the face rests in between. Pointless
+            // while the screen is dark.
+            if (!is_screen_asleep_ && clock_ticks_ % kIdleBlinkIntervalSeconds == 0 &&
                 GetDeviceState() == kDeviceStateIdle) {
                 display->SetEmotion("neutral");
             }
@@ -664,6 +707,13 @@ void Application::InitializeProtocol() {
                     display->SetEmotion(emotion_str.c_str());
                 });
             }
+        } else if (strcmp(type->valuestring, "accent") == 0) {
+            auto color = cJSON_GetObjectItem(root, "color");
+            if (cJSON_IsString(color)) {
+                Schedule([display, color_str = std::string(color->valuestring)]() {
+                    display->SetAccentColor(color_str.c_str());
+                });
+            }
         } else if (strcmp(type->valuestring, "mcp") == 0) {
             auto payload = cJSON_GetObjectItem(root, "payload");
             if (cJSON_IsObject(payload)) {
@@ -872,10 +922,73 @@ void Application::InitializeSystemTime() {
 }
 #endif
 
+void Application::SleepScreen() {
+    if (is_screen_asleep_) {
+        return;
+    }
+    is_screen_asleep_ = true;
+    ESP_LOGI(TAG, "Screen asleep after %d s idle", idle_seconds_);
+
+    auto& board = Board::GetInstance();
+    board.GetDisplay()->SetPowerSaveMode(true);
+    auto backlight = board.GetBacklight();
+    if (backlight != nullptr) {
+        // Not permanent: the configured brightness has to survive the nap.
+        backlight->SetBrightness(0);
+    }
+}
+
+void Application::NoteUserActivity() {
+    idle_seconds_ = 0;
+    if (!is_screen_asleep_) {
+        return;
+    }
+    is_screen_asleep_ = false;
+    ESP_LOGI(TAG, "Screen awake");
+
+    auto& board = Board::GetInstance();
+    auto backlight = board.GetBacklight();
+    if (backlight != nullptr) {
+        backlight->RestoreBrightness();
+    }
+    board.GetDisplay()->SetPowerSaveMode(false);
+}
+
 void Application::SendGesture(const std::string& gesture) {
     Schedule([this, gesture]() {
+        // A touch on a dark screen means "wake up", nothing more: forwarding it
+        // would also open the dashboard, which is not what the hand meant.
+        const bool was_asleep = is_screen_asleep_;
+        NoteUserActivity();
+        if (was_asleep) {
+            return;
+        }
+
         if (!protocol_) {
             return;
+        }
+
+        // Recording is on the press-and-hold; a tap is only ever a way to stop
+        // something, so it never reaches the server as a gesture.
+        if (gesture == "tap") {
+            switch (GetDeviceState()) {
+                case kDeviceStateSpeaking:
+                    AbortSpeaking(kAbortReasonNone);
+                    // Telling the server to stop is not enough on its own:
+                    // seconds of already-delivered audio are sitting in the
+                    // queues and would keep playing over the silence.
+                    audio_service_.ResetDecoder();
+                    SetDeviceState(kDeviceStateIdle);
+                    return;
+                case kDeviceStateListening:
+                    // Holding the screen is what records; a tap during a turn
+                    // means "drop it".
+                    StopListening();
+                    return;
+                default:
+                    // Mid-connect or mid-activation: a tap has nothing to toggle.
+                    return;
+            }
         }
         if (!protocol_->IsAudioChannelOpened() && !protocol_->OpenAudioChannel()) {
             ESP_LOGW(TAG, "Gesture '%s' dropped: no channel", gesture.c_str());
@@ -887,6 +1000,12 @@ void Application::SendGesture(const std::string& gesture) {
 
 void Application::FinishSpeaking() {
     if (listening_mode_ == kListeningModeManualStop) {
+        // An interruption is not a completion, so no cue on abort. In auto
+        // mode the listening branch plays its own cue, and this one would be
+        // cleared by the decoder reset anyway.
+        if (!aborted_) {
+            audio_service_.PlaySound(Lang::SoundVariants::SpeechDone());
+        }
         SetDeviceState(kDeviceStateIdle);
     } else {
         SetDeviceState(kDeviceStateListening);
@@ -901,14 +1020,39 @@ void Application::HandleStopListeningEvent() {
         SetDeviceState(kDeviceStateWifiConfiguring);
         return;
     } else if (state == kDeviceStateListening) {
+        // hold_end is what makes the server transcribe, so everything recorded
+        // has to be on the wire before it goes out. The tail of an utterance is
+        // still working its way through the encoder when the finger lifts, and
+        // anything arriving after hold_end is simply not part of the turn.
         if (protocol_) {
+            for (int attempt = 0; attempt < kListenFlushAttempts; ++attempt) {
+                bool sent_any = false;
+                while (auto packet = audio_service_.PopPacketFromSendQueue()) {
+                    sent_any = true;
+                    if (!protocol_->SendAudio(std::move(packet))) {
+                        break;
+                    }
+                }
+                if (!sent_any && attempt > 0) {
+                    break;
+                }
+                vTaskDelay(pdMS_TO_TICKS(kListenFlushWaitMs));
+            }
             protocol_->SendStopListening();
         }
         SetDeviceState(kDeviceStateIdle);
+        // The idle transition disables voice processing without resetting the
+        // decoder, so a cue queued here survives it.
+        audio_service_.PlaySound(Lang::SoundVariants::ListenEnd());
     }
 }
 
 void Application::HandleWakeWordDetectedEvent() {
+#ifdef CONFIG_APOLLO_PROTOCOL
+    // Saying the wake word to a dark device should light it up, whatever the
+    // rest of this handler decides to do about the turn itself.
+    NoteUserActivity();
+#endif
     if (!protocol_) {
         return;
     }
@@ -928,7 +1072,7 @@ void Application::HandleWakeWordDetectedEvent() {
         if (state == kDeviceStateListening) {
             protocol_->SendStartListening(GetDefaultListeningMode());
             audio_service_.ResetDecoder();
-            audio_service_.PlaySound(Lang::Sounds::OGG_POPUP);
+            audio_service_.PlaySound(Lang::SoundVariants::ListenStart());
             // Re-enable wake word detection as it was stopped by the detection itself
             audio_service_.EnableWakeWordDetection(true);
         } else {
@@ -1031,6 +1175,10 @@ void Application::HandleStateChangedEvent() {
             break;
         case kDeviceStateListening:
             display->SetStatus(Lang::Strings::LISTENING);
+            // SetStatus already raises EMOTE_MGR_EVT_LISTEN, which drives the
+            // listen_anim object. Setting a "listening" emotion on top of that
+            // replaces the face itself with listen.eaf, which is not a face and
+            // reads as an error.
             display->SetEmotion("neutral");
 
             // Make sure the audio processor is running
@@ -1081,11 +1229,11 @@ void Application::StartListeningAudio() {
 
     ConfigureWakeWordForListening();
 
-    // Play popup sound after ResetDecoder (in EnableVoiceProcessing) has been called
-    if (play_popup_on_listening_) {
-        play_popup_on_listening_ = false;
-        audio_service_.PlaySound(Lang::Sounds::OGG_POPUP);
-    }
+    // Every listening start gets the cue, held button or wake word alike. It
+    // has to play after ResetDecoder (in EnableVoiceProcessing) or it would be
+    // cleared before it sounds.
+    play_popup_on_listening_ = false;
+    audio_service_.PlaySound(Lang::SoundVariants::ListenStart());
 }
 
 void Application::ConfigureWakeWordForListening() {

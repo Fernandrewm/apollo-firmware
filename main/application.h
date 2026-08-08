@@ -147,6 +147,9 @@ private:
     bool play_popup_on_listening_ = false;  // Flag to play popup sound after state changes to listening
     bool pending_listening_start_ = false;  // Waiting for playback to drain before starting listening (auto mode)
     bool pending_speech_stop_ = false;  // Reply fully received, still playing out
+    int idle_seconds_ = 0;              // Seconds since the last sign of life
+    bool is_screen_asleep_ = false;
+    int last_channel_attempt_ticks_ = -1000;  // Rate-limits idle channel reopening
     int clock_ticks_ = 0;
     TaskHandle_t activation_task_handle_ = nullptr;
 
@@ -166,6 +169,14 @@ private:
     void StartListeningAudio();
     void FinishSpeaking();
     void InitializeSystemTime();
+    void SleepScreen();
+
+public:
+    // Any sign of the user: touch, wake word, a turn starting. Wakes the screen
+    // if it had gone dark and restarts the inactivity countdown.
+    void NoteUserActivity();
+
+private:
 
 public:
     // Called from the board's touch task. Opens the channel if needed, because

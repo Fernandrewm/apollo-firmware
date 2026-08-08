@@ -9,6 +9,7 @@
 #include <cJSON.h>
 #include <cstring>
 #include "assets/lang_config.h"
+#include "assets/sound_variants.h"
 
 #define TAG "Apollo"
 
@@ -26,7 +27,10 @@ namespace {
 // as a crash rather than as calm.
 const char* MapApolloEmotion(const char* apollo_emotion) {
     if (strcmp(apollo_emotion, "curious") == 0) {
-        return "shocked";
+        // Not "shocked": that asset is the wide-eyed panic face and reads as an
+        // error. "winking" is neutral.eaf with loop=true, so the eyes keep
+        // blinking attentively while the listen icon does the signaling.
+        return "winking";
     }
     if (strcmp(apollo_emotion, "focused") == 0) {
         return "thinking";
@@ -103,16 +107,29 @@ bool ApolloProtocol::SendAudio(std::unique_ptr<AudioStreamPacket> packet) {
     }
     // Raw PCM, no framing: the server concatenates the binary frames of an
     // utterance and wraps them in a RIFF header before transcription.
-    return websocket_->Send((const char*)packet->payload.data(), packet->payload.size(), true);
+    bool sent =
+        websocket_->Send((const char*)packet->payload.data(), packet->payload.size(), true);
+    if (sent) {
+        turn_audio_bytes_ += packet->payload.size();
+    }
+    return sent;
 }
 
 void ApolloProtocol::SendStartListening(ListeningMode mode) {
     // Apollo distinguishes a held button from a wake word, and resets its audio
     // buffer on either.
+    turn_audio_bytes_ = 0;
     SendEvent(mode == kListeningModeManualStop ? "hold_start" : "wake");
 }
 
-void ApolloProtocol::SendStopListening() { SendEvent("hold_end"); }
+void ApolloProtocol::SendStopListening() {
+    // The server transcribes whatever arrived before this event, so knowing how
+    // much actually went out is the difference between "the mic is deaf" and
+    // "the audio never left the device".
+    ESP_LOGI(TAG, "Turn audio sent: %u bytes (%.2f s)", (unsigned)turn_audio_bytes_,
+             turn_audio_bytes_ / 32000.0f);
+    SendEvent("hold_end");
+}
 
 void ApolloProtocol::SendWakeWordDetected(const std::string& wake_word) {
     // Apollo has no voice-print step, so the wake word itself carries no extra
@@ -135,6 +152,12 @@ void ApolloProtocol::SendGesture(const std::string& gesture) {
     } else {
         cJSON_AddStringToObject(root, "type", "gesture");
         cJSON_AddStringToObject(root, "gesture", gesture.c_str());
+        if (gesture.rfind("swipe", 0) == 0) {
+            // A swipe cycles the speech mode. The cue plays now, on the
+            // gesture, rather than on the server's ui_state echo: feedback
+            // that waits for a round trip feels broken on a slow link.
+            Application::GetInstance().PlaySound(Lang::SoundVariants::ModeSwitch());
+        }
     }
     cJSON_AddNumberToObject(root, "ts", NowMilliseconds());
 
@@ -148,10 +171,11 @@ void ApolloProtocol::SendGesture(const std::string& gesture) {
 }
 
 void ApolloProtocol::SendAbortSpeaking(AbortReason reason) {
-    // Apollo's schema has no abort message: a turn runs to completion server
-    // side. Stop feeding the speaker locally and drop the rest of the run.
     (void)reason;
-    ESP_LOGW(TAG, "Abort requested but Apollo has no abort message; dropping local playback");
+    // Tell the server to stop streaming, then drop what is already queued here:
+    // without the first the audio keeps arriving, without the second the device
+    // keeps playing what it already has.
+    SendEvent("abort");
     FinishTtsRun();
 }
 
@@ -193,6 +217,13 @@ void ApolloProtocol::EmitEmotion(const char* emotion) {
     EmitTranslatedJson(root);
 }
 
+void ApolloProtocol::EmitAccentColor(const char* color) {
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "type", "accent");
+    cJSON_AddStringToObject(root, "color", color);
+    EmitTranslatedJson(root);
+}
+
 void ApolloProtocol::EmitAlert(const char* status, const char* message, const char* emotion) {
     cJSON* root = cJSON_CreateObject();
     cJSON_AddStringToObject(root, "type", "alert");
@@ -206,6 +237,13 @@ void ApolloProtocol::HandleUiState(const cJSON* root) {
     auto emotion = cJSON_GetObjectItem(root, "emotion");
     if (cJSON_IsString(emotion)) {
         EmitEmotion(MapApolloEmotion(emotion->valuestring));
+    }
+
+    // The speech mode is signaled by the accent ring color alone, so it has to
+    // ride along on every ui_state, not only on an explicit mode change.
+    auto accent = cJSON_GetObjectItem(root, "accentColor");
+    if (cJSON_IsString(accent)) {
+        EmitAccentColor(accent->valuestring);
     }
 
     // Apollo's caption is whatever the agent is saying or thinking about, which
@@ -267,7 +305,8 @@ void ApolloProtocol::HandleIncomingAudio(const char* data, size_t len) {
         AudioStreamPacket{.sample_rate = server_sample_rate_,
                           .frame_duration = server_frame_duration_,
                           .timestamp = 0,
-                          .payload = std::vector<uint8_t>(payload, payload + len)}));
+                          .payload = std::vector<uint8_t>(payload, payload + len),
+                          .pcm = true}));
 
     if (!tts_run_active_) {
         return;
@@ -295,6 +334,11 @@ void ApolloProtocol::HandleIncomingJson(const char* data, size_t len) {
         HandleUiState(root);
     } else if (strcmp(type->valuestring, "tts_start") == 0) {
         HandleTtsStart(root);
+    } else if (strcmp(type->valuestring, "tts_aborted") == 0) {
+        // The byte total promised by tts_start will never arrive, so close the
+        // run explicitly or the device waits for speech that stopped coming.
+        ESP_LOGI(TAG, "Server acknowledged abort");
+        FinishTtsRun();
     } else if (strcmp(type->valuestring, "error") == 0) {
         auto message = cJSON_GetObjectItem(root, "message");
         EmitAlert("Error", cJSON_IsString(message) ? message->valuestring : "Error", "sad");

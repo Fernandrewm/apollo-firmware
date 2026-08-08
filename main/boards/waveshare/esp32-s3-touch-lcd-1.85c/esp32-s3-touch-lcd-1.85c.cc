@@ -375,6 +375,9 @@ private:
     static constexpr int kSwipeMinTravelPx = 60;
     static constexpr uint32_t kTapMaxMs = 400;
     static constexpr uint32_t kDoubleTapWindowMs = 400;
+    // Just past kTapMaxMs, so a press only becomes push-to-talk once it is too
+    // long to still be a tap.
+    static constexpr uint32_t kHoldToTalkMs = 450;
     static constexpr uint32_t kTouchPollMs = 20;
     static constexpr int kMaxTouchReadFailures = 25;
 
@@ -474,6 +477,7 @@ private:
         int start_x = 0, start_y = 0, last_x = 0, last_y = 0;
         uint32_t press_started_ms = 0;
         uint32_t pending_tap_ms = 0;  // 0 means no single tap awaiting its window
+        bool is_hold_talking = false;
 
         while (true) {
             uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
@@ -510,7 +514,30 @@ private:
             } else if (is_pressed) {
                 last_x = x;
                 last_y = y;
+                // Hold the screen to talk: start recording once the press is too
+                // long to be a tap, and keep going until the finger lifts. The
+                // finger has to stay put, or this would hijack a slow swipe.
+                if (!is_hold_talking && now_ms - press_started_ms >= kHoldToTalkMs &&
+                    abs(last_x - start_x) < kTapMaxTravelPx &&
+                    abs(last_y - start_y) < kTapMaxTravelPx) {
+                    is_hold_talking = true;
+                    pending_tap_ms = 0;
+                    auto& app = Application::GetInstance();
+                    // A hold on a dark screen should light it up and record, not
+                    // just light it up.
+                    app.NoteUserActivity();
+                    app.StartListening();
+                }
             } else if (was_pressed) {
+                if (is_hold_talking) {
+                    // Lifting the finger is what sends the turn.
+                    is_hold_talking = false;
+                    Application::GetInstance().StopListening();
+                    was_pressed = is_pressed;
+                    vTaskDelay(pdMS_TO_TICKS(kTouchPollMs));
+                    continue;
+                }
+
                 int dx = last_x - start_x;
                 int dy = last_y - start_y;
                 uint32_t held_ms = now_ms - press_started_ms;
