@@ -116,6 +116,33 @@ void ApolloProtocol::SendWakeWordDetected(const std::string& wake_word) {
     (void)wake_word;
 }
 
+void ApolloProtocol::SendGesture(const std::string& gesture) {
+    if (websocket_ == nullptr || !websocket_->IsConnected()) {
+        return;
+    }
+
+    cJSON* root = cJSON_CreateObject();
+    if (confirm_pending_) {
+        // A pending confirmation owns the next gesture: a tap accepts, anything
+        // else declines. Waiting for the 30 second expiry would be worse.
+        confirm_pending_ = false;
+        cJSON_AddStringToObject(root, "type", "confirm");
+        cJSON_AddBoolToObject(root, "ok", gesture == "tap");
+    } else {
+        cJSON_AddStringToObject(root, "type", "gesture");
+        cJSON_AddStringToObject(root, "gesture", gesture.c_str());
+    }
+    cJSON_AddNumberToObject(root, "ts", NowMilliseconds());
+
+    auto serialized = cJSON_PrintUnformatted(root);
+    std::string message(serialized);
+    cJSON_free(serialized);
+    cJSON_Delete(root);
+
+    ESP_LOGI(TAG, "Gesture '%s' -> %s", gesture.c_str(), message.c_str());
+    SendText(message);
+}
+
 void ApolloProtocol::SendAbortSpeaking(AbortReason reason) {
     // Apollo's schema has no abort message: a turn runs to completion server
     // side. Stop feeding the speaker locally and drop the rest of the run.
@@ -130,6 +157,7 @@ bool ApolloProtocol::IsAudioChannelOpened() const {
 
 void ApolloProtocol::CloseAudioChannel(bool send_goodbye) {
     (void)send_goodbye;
+    confirm_pending_ = false;
     tts_run_active_ = false;
     tts_expected_bytes_ = 0;
     tts_received_bytes_ = 0;
@@ -279,7 +307,8 @@ void ApolloProtocol::HandleIncomingJson(const char* data, size_t len) {
     } else if (strcmp(type->valuestring, "confirm_request") == 0) {
         auto summary = cJSON_GetObjectItem(root, "summary");
         if (cJSON_IsString(summary)) {
-            EmitAlert("Confirmar", summary->valuestring, "confused");
+            confirm_pending_ = true;
+            EmitAlert("Tocá para confirmar", summary->valuestring, "confused");
         }
     } else {
         // `dashboard` has no UI yet, and the agents SDK injects its own
@@ -311,6 +340,7 @@ bool ApolloProtocol::OpenAudioChannel() {
     }
 
     error_occurred_ = false;
+    confirm_pending_ = false;
     tts_run_active_ = false;
     tts_expected_bytes_ = 0;
     tts_received_bytes_ = 0;

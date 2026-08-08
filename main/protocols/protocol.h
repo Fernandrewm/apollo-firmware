@@ -64,6 +64,9 @@ public:
     virtual void SendStopListening();
     virtual void SendAbortSpeaking(AbortReason reason);
     virtual void SendMcpMessage(const std::string& message);
+    // Touch gestures have no xiaozhi equivalent, so this is a no-op unless the
+    // protocol in use understands them.
+    virtual void SendGesture(const std::string& gesture) { (void)gesture; }
 
 protected:
     std::function<void(const cJSON* root)> on_incoming_json_;

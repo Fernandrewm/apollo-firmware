@@ -166,6 +166,13 @@ private:
     void StartListeningAudio();
     void FinishSpeaking();
     void InitializeSystemTime();
+
+public:
+    // Called from the board's touch task. Opens the channel if needed, because
+    // most gestures are useful precisely when the device is sitting idle.
+    void SendGesture(const std::string& gesture);
+
+private:
     void ConfigureWakeWordForListening();
 
     // Activation task (runs in background)

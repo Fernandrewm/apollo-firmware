@@ -37,6 +37,7 @@ public:
     void SendStopListening() override;
     void SendAbortSpeaking(AbortReason reason) override;
     void SendWakeWordDetected(const std::string& wake_word) override;
+    void SendGesture(const std::string& gesture) override;
 
 private:
     std::unique_ptr<WebSocket> websocket_;
@@ -47,6 +48,10 @@ private:
     uint32_t tts_expected_bytes_ = 0;
     uint32_t tts_received_bytes_ = 0;
     bool tts_run_active_ = false;
+
+    // While the server is waiting on a confirmation, gestures answer it
+    // instead of doing their usual job.
+    bool confirm_pending_ = false;
 
     bool SendText(const std::string& text) override;
     bool SendEvent(const char* type);

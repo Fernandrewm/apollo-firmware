@@ -849,6 +849,19 @@ void Application::InitializeSystemTime() {
 }
 #endif
 
+void Application::SendGesture(const std::string& gesture) {
+    Schedule([this, gesture]() {
+        if (!protocol_) {
+            return;
+        }
+        if (!protocol_->IsAudioChannelOpened() && !protocol_->OpenAudioChannel()) {
+            ESP_LOGW(TAG, "Gesture '%s' dropped: no channel", gesture.c_str());
+            return;
+        }
+        protocol_->SendGesture(gesture);
+    });
+}
+
 void Application::FinishSpeaking() {
     if (listening_mode_ == kListeningModeManualStop) {
         SetDeviceState(kDeviceStateIdle);

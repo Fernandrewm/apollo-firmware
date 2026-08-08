@@ -16,6 +16,11 @@
 #include <esp_lcd_st77916.h>
 #include <esp_timer.h>
 #include "esp_io_expander_tca9554.h"
+#ifdef CONFIG_APOLLO_PROTOCOL
+#include <esp_lcd_touch_cst816s.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#endif
 
 #define TAG "waveshare_lcd_1_85c"
 
@@ -354,6 +359,184 @@ private:
                                     DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_OFFSET_X, DISPLAY_OFFSET_Y, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y, DISPLAY_SWAP_XY);
     }
 
+#ifdef CONFIG_APOLLO_PROTOCOL
+    // Tuned for a 360x360 round panel.
+    static constexpr int kTapMaxTravelPx = 30;
+    static constexpr int kSwipeMinTravelPx = 60;
+    static constexpr uint32_t kTapMaxMs = 400;
+    static constexpr uint32_t kDoubleTapWindowMs = 400;
+    static constexpr uint32_t kTouchPollMs = 20;
+    static constexpr int kMaxTouchReadFailures = 25;
+
+    esp_lcd_touch_handle_t touch_handle_ = nullptr;
+    esp_lcd_panel_io_handle_t touch_io_handle_ = nullptr;
+
+    // The CST816 drops into standby after two seconds without a touch and stops
+    // answering I2C entirely, which reads as a dead controller. Register 0xFE
+    // ("DisAutoSleep") keeps it awake.
+    bool DisableTouchAutoSleep() {
+        if (touch_io_handle_ == nullptr) {
+            return false;
+        }
+        const uint8_t keep_awake = 0x01;
+        auto err = esp_lcd_panel_io_tx_param(touch_io_handle_, 0xFE, &keep_awake, 1);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "Could not disable touch auto-sleep: %s", esp_err_to_name(err));
+            return false;
+        }
+        return true;
+    }
+
+    void ScanI2cBus() {
+        // The touch controller shares the bus with the io expander and the
+        // audio codec, and its part number is not documented consistently, so
+        // report what actually answers.
+        std::string found;
+        for (uint16_t address = 0x08; address < 0x78; address++) {
+            if (i2c_master_probe(i2c_bus_, address, 50) == ESP_OK) {
+                char entry[8];
+                snprintf(entry, sizeof(entry), "0x%02X ", address);
+                found += entry;
+            }
+        }
+        ESP_LOGI(TAG, "I2C devices: %s", found.empty() ? "(none)" : found.c_str());
+    }
+
+    void InitializeTouch() {
+        ScanI2cBus();
+        esp_lcd_panel_io_handle_t tp_io_handle = nullptr;
+        // Not ESP_LCD_TOUCH_IO_I2C_CST816S_CONFIG(): that macro lists its
+        // designators out of declaration order, which C++ rejects. Plain
+        // assignment sidesteps it.
+        esp_lcd_panel_io_i2c_config_t tp_io_config = {};
+        tp_io_config.dev_addr = ESP_LCD_TOUCH_IO_I2C_CST816S_ADDRESS;
+        tp_io_config.scl_speed_hz = 100000;
+        tp_io_config.control_phase_bytes = 1;
+        tp_io_config.dc_bit_offset = 0;
+        tp_io_config.lcd_cmd_bits = 8;
+        tp_io_config.lcd_param_bits = 0;
+        tp_io_config.flags.dc_low_on_data = 0;
+        tp_io_config.flags.disable_control_phase = 1;
+
+        auto err = esp_lcd_new_panel_io_i2c(i2c_bus_, &tp_io_config, &tp_io_handle);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "Touch IO failed: %s; gestures disabled", esp_err_to_name(err));
+            return;
+        }
+
+        esp_lcd_touch_config_t tp_cfg = {
+            .x_max = DISPLAY_WIDTH - 1,
+            .y_max = DISPLAY_HEIGHT - 1,
+            .rst_gpio_num = TP_PIN_NUM_RST,
+            .int_gpio_num = TP_PIN_NUM_INT,
+            .levels = {
+                .reset = 0,
+                .interrupt = 0,
+            },
+            .flags = {
+                .swap_xy = DISPLAY_SWAP_XY,
+                .mirror_x = DISPLAY_MIRROR_X,
+                .mirror_y = DISPLAY_MIRROR_Y,
+            },
+        };
+
+        // Deliberately not ESP_ERROR_CHECK: a touch controller that does not
+        // answer should cost gestures, not the whole boot.
+        err = esp_lcd_touch_new_i2c_cst816s(tp_io_handle, &tp_cfg, &touch_handle_);
+        if (err != ESP_OK || touch_handle_ == nullptr) {
+            ESP_LOGW(TAG, "Touch init failed: %s; gestures disabled", esp_err_to_name(err));
+            touch_handle_ = nullptr;
+            return;
+        }
+
+        touch_io_handle_ = tp_io_handle;
+        DisableTouchAutoSleep();
+
+        xTaskCreate([](void* arg) { static_cast<CustomBoard*>(arg)->TouchGestureTask(); },
+                    "touch_gesture", 4096, this, 3, nullptr);
+        ESP_LOGI(TAG, "Touch panel initialized, gestures enabled");
+    }
+
+    void TouchGestureTask() {
+        bool was_pressed = false;
+        int consecutive_read_failures = 0;
+        bool auto_sleep_rearmed = false;
+        int start_x = 0, start_y = 0, last_x = 0, last_y = 0;
+        uint32_t press_started_ms = 0;
+        uint32_t pending_tap_ms = 0;  // 0 means no single tap awaiting its window
+
+        while (true) {
+            uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+
+            uint16_t x = 0, y = 0;
+            uint8_t point_count = 0;
+            // A controller that never answers would otherwise log an error per
+            // poll, forever. Give up instead of drowning the log.
+            if (esp_lcd_touch_read_data(touch_handle_) != ESP_OK) {
+                if (++consecutive_read_failures >= kMaxTouchReadFailures) {
+                    // It may simply have fallen asleep again; re-arm once
+                    // before writing the panel off.
+                    if (!auto_sleep_rearmed && DisableTouchAutoSleep()) {
+                        auto_sleep_rearmed = true;
+                        consecutive_read_failures = 0;
+                    } else {
+                        ESP_LOGE(TAG, "Touch controller unresponsive, stopping gesture task");
+                        vTaskDelete(nullptr);
+                        return;
+                    }
+                }
+                vTaskDelay(pdMS_TO_TICKS(kTouchPollMs));
+                continue;
+            }
+            consecutive_read_failures = 0;
+            bool is_pressed =
+                esp_lcd_touch_get_coordinates(touch_handle_, &x, &y, nullptr, &point_count, 1) &&
+                point_count > 0;
+
+            if (is_pressed && !was_pressed) {
+                start_x = last_x = x;
+                start_y = last_y = y;
+                press_started_ms = now_ms;
+            } else if (is_pressed) {
+                last_x = x;
+                last_y = y;
+            } else if (was_pressed) {
+                int dx = last_x - start_x;
+                int dy = last_y - start_y;
+                uint32_t held_ms = now_ms - press_started_ms;
+
+                if (abs(dx) >= kSwipeMinTravelPx && abs(dx) > abs(dy)) {
+                    pending_tap_ms = 0;
+                    EmitGesture(dx > 0 ? "swipe_right" : "swipe_left");
+                } else if (held_ms <= kTapMaxMs && abs(dx) < kTapMaxTravelPx &&
+                           abs(dy) < kTapMaxTravelPx) {
+                    if (pending_tap_ms != 0) {
+                        pending_tap_ms = 0;
+                        EmitGesture("double_tap");
+                    } else {
+                        // Hold the single tap back: it only becomes a tap once
+                        // the double tap window closes without a second press.
+                        pending_tap_ms = now_ms;
+                    }
+                }
+            }
+
+            if (pending_tap_ms != 0 && now_ms - pending_tap_ms > kDoubleTapWindowMs) {
+                pending_tap_ms = 0;
+                EmitGesture("tap");
+            }
+
+            was_pressed = is_pressed;
+            vTaskDelay(pdMS_TO_TICKS(kTouchPollMs));
+        }
+    }
+
+    void EmitGesture(const char* gesture) {
+        ESP_LOGI(TAG, "Touch gesture: %s", gesture);
+        Application::GetInstance().SendGesture(gesture);
+    }
+#endif
+
     void InitializeButtons() {
 #ifdef CONFIG_APOLLO_PROTOCOL
         // Apollo is push-to-talk: its protocol is built around hold_start and
@@ -397,6 +580,9 @@ public:
         InitializeSpi();
         Initializest77916Display();
         InitializeButtons();
+#ifdef CONFIG_APOLLO_PROTOCOL
+        InitializeTouch();
+#endif
         GetBacklight()->RestoreBrightness();
     }
 
