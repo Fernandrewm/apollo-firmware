@@ -12,6 +12,34 @@ config APOLLO_PROTOCOL
         Apollo carries raw PCM in both directions, so this also selects the
         PCM uplink below.
 
+config APOLLO_URL
+    string "Apollo base url"
+    depends on APOLLO_PROTOCOL
+    default ""
+    help
+        Base websocket url of the Apollo worker, without a path, for example
+        wss://apollo.example.workers.dev. Used only when the NVS namespace
+        "apollo" has no "url" key, so a provisioned device overrides this.
+
+config APOLLO_TOKEN
+    string "Apollo device shared secret"
+    depends on APOLLO_PROTOCOL
+    default ""
+    help
+        Value of DEVICE_SHARED_SECRET on the worker. Same NVS override rule as
+        APOLLO_URL.
+
+        Do not commit a real secret to sdkconfig.defaults: set it in the local
+        (gitignored) sdkconfig instead, or provision NVS.
+
+config APOLLO_DEVICE_ID
+    string "Apollo device id"
+    depends on APOLLO_PROTOCOL
+    default "desk"
+    help
+        Agent instance name, which is also the conversation the device joins.
+        Falls back to the MAC address when left empty.
+
 config APOLLO_RAW_PCM_UPLINK
     bool "Send microphone audio as raw PCM instead of Opus"
     default y if APOLLO_PROTOCOL

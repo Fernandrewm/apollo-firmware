@@ -18,3 +18,6 @@ main/mmap_generate_emoji.h
 *.bin
 mmap_generate_*.h
 .clangd
+
+# Machine-local build config (may contain secrets)
+sdkconfig.defaults.local

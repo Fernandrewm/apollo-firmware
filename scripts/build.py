@@ -1337,6 +1337,12 @@ def _configure_build(
     if Path("sdkconfig.defaults").exists():
         defaults.append("sdkconfig.defaults")
     defaults.append(fragment.as_posix())
+    # sdkconfig is regenerated from these files on every run, so hand-edits to
+    # it never survive. This last (gitignored) file is where machine-local
+    # values belong, secrets included; being last, it overrides the rest.
+    local_defaults = Path("sdkconfig.defaults.local")
+    if local_defaults.exists():
+        defaults.append(local_defaults.as_posix())
     _run_idf(
         f"-DIDF_TARGET={target}",
         f"-DSDKCONFIG_DEFAULTS={';'.join(defaults)}",

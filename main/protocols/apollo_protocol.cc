@@ -292,10 +292,14 @@ void ApolloProtocol::HandleIncomingJson(const char* data, size_t len) {
 }
 
 bool ApolloProtocol::OpenAudioChannel() {
+    // NVS wins so a provisioned device can be repointed without a rebuild, but
+    // the build-time values keep the common case flash-and-go. Provisioning NVS
+    // rewrites the whole partition, which would take the wifi credentials with
+    // it, so defaults are the friendlier path here.
     Settings settings("apollo", false);
-    std::string base_url = settings.GetString("url");
-    std::string token = settings.GetString("token");
-    std::string device_id = settings.GetString("device_id");
+    std::string base_url = settings.GetString("url", CONFIG_APOLLO_URL);
+    std::string token = settings.GetString("token", CONFIG_APOLLO_TOKEN);
+    std::string device_id = settings.GetString("device_id", CONFIG_APOLLO_DEVICE_ID);
 
     if (base_url.empty()) {
         ESP_LOGE(TAG, "No Apollo url configured in NVS namespace 'apollo'");
