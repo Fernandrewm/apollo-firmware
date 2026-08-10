@@ -475,6 +475,7 @@ void Application::ActivationTask() {
     // never happen.
     ESP_LOGI(TAG, "Apollo protocol selected, skipping OTA activation");
     InitializeSystemTime();
+    CheckApolloFirmwareUpdate();
 #endif
 
     // Initialize the protocol
@@ -483,6 +484,55 @@ void Application::ActivationTask() {
     // Signal completion to main loop
     xEventGroupSetBits(event_group_, MAIN_EVENT_ACTIVATION_DONE);
 }
+
+#ifdef CONFIG_APOLLO_PROTOCOL
+void Application::CheckApolloFirmwareUpdate() {
+    // First and unconditionally: with CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE,
+    // an image installed over the air boots as pending-verify and reverts on
+    // the next reboot unless it is marked valid. The xiaozhi path that did
+    // this lives in CheckNewVersion, which is compiled out under Apollo.
+    ota_->MarkCurrentVersionValid();
+
+    Settings settings("apollo", false);
+    std::string base_url = settings.GetString("url");
+    if (base_url.empty()) {
+        base_url = CONFIG_APOLLO_URL;
+    }
+    std::string token = settings.GetString("token");
+    if (token.empty()) {
+        token = CONFIG_APOLLO_TOKEN;
+    }
+    if (base_url.empty() || token.empty()) {
+        ESP_LOGW(TAG, "Apollo url or token not configured, skipping firmware check");
+        return;
+    }
+
+    if (base_url.rfind("wss://", 0) == 0) {
+        base_url = "https://" + base_url.substr(6);
+    } else if (base_url.rfind("ws://", 0) == 0) {
+        base_url = "http://" + base_url.substr(5);
+    }
+    while (!base_url.empty() && base_url.back() == '/') {
+        base_url.pop_back();
+    }
+    ota_->SetCheckVersionUrl(base_url + "/ota/check?token=" + token);
+
+    // A single attempt with no retries: unlike xiaozhi's activation loop, a
+    // failed check must never hold the device in kDeviceStateActivating.
+    esp_err_t error = ota_->CheckVersion();
+    if (error != ESP_OK) {
+        ESP_LOGW(TAG, "Apollo firmware check failed (0x%x), continuing boot", error);
+        return;
+    }
+    if (!ota_->HasNewVersion()) {
+        ESP_LOGI(TAG, "Firmware %s is current", ota_->GetCurrentVersion().c_str());
+        return;
+    }
+    ESP_LOGI(TAG, "Upgrading firmware %s -> %s", ota_->GetCurrentVersion().c_str(),
+             ota_->GetFirmwareVersion().c_str());
+    UpgradeFirmware(ota_->GetFirmwareUrl(), ota_->GetFirmwareVersion());
+}
+#endif
 
 void Application::CheckAssetsVersion() {
     // Only allow CheckAssetsVersion to be called once

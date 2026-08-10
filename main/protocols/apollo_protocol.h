@@ -39,6 +39,7 @@ public:
     void SendWakeWordDetected(const std::string& wake_word) override;
     void SendGesture(const std::string& gesture) override;
     void SendTelemetry(const DeviceTelemetry& telemetry) override;
+    void SendMcpMessage(const std::string& payload) override;
 
 private:
     std::unique_ptr<WebSocket> websocket_;

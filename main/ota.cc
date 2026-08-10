@@ -44,6 +44,9 @@ Ota::~Ota() {
 }
 
 std::string Ota::GetCheckVersionUrl() {
+    if (!check_version_url_override_.empty()) {
+        return check_version_url_override_;
+    }
     Settings settings("wifi", false);
     std::string url = settings.GetString("ota_url");
     if (url.empty()) {
@@ -397,9 +400,19 @@ std::vector<int> Ota::ParseVersion(const std::string& version) {
     std::string segment;
     
     while (std::getline(ss, segment, '.')) {
-        versionNumbers.push_back(std::stoi(segment));
+        // std::stoi throws on non-numeric segments; a malformed server version
+        // must degrade to 0, never abort the device.
+        int segment_number = 0;
+        for (char digit : segment) {
+            if (digit < '0' || digit > '9') {
+                segment_number = 0;
+                break;
+            }
+            segment_number = segment_number * 10 + (digit - '0');
+        }
+        versionNumbers.push_back(segment_number);
     }
-    
+
     return versionNumbers;
 }
 

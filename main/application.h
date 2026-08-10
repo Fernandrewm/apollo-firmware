@@ -196,6 +196,7 @@ private:
     // Helper methods
     void CheckAssetsVersion();
     void CheckNewVersion();
+    void CheckApolloFirmwareUpdate();
     void InitializeProtocol();
     void ShowActivationCode(const std::string& code, const std::string& message);
     void SetListeningMode(ListeningMode mode);

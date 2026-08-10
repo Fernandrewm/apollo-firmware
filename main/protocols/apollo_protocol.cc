@@ -108,6 +108,25 @@ bool ApolloProtocol::SendText(const std::string& text) {
     return true;
 }
 
+void ApolloProtocol::SendMcpMessage(const std::string& payload) {
+    // The inherited frame carries xiaozhi's empty session_id and no ts; Apollo's
+    // dialect wants {"type","payload","ts"} like every other event.
+    cJSON* payload_json = cJSON_Parse(payload.c_str());
+    if (payload_json == nullptr) {
+        ESP_LOGE(TAG, "Dropping unparseable MCP payload");
+        return;
+    }
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "type", "mcp");
+    cJSON_AddItemToObject(root, "payload", payload_json);
+    cJSON_AddNumberToObject(root, "ts", NowMilliseconds());
+    auto serialized = cJSON_PrintUnformatted(root);
+    std::string message(serialized);
+    cJSON_free(serialized);
+    cJSON_Delete(root);
+    SendText(message);
+}
+
 bool ApolloProtocol::SendEvent(const char* type) {
     cJSON* root = cJSON_CreateObject();
     cJSON_AddStringToObject(root, "type", type);
@@ -417,6 +436,13 @@ void ApolloProtocol::HandleIncomingJson(const char* data, size_t len) {
                 Application::GetInstance().Schedule(
                     [sound]() { Application::GetInstance().PlaySound(sound); });
             }
+        }
+    } else if (strcmp(type->valuestring, "mcp") == 0) {
+        // Handed to Application's dispatcher whole: it unwraps `payload` and
+        // routes it into the embedded McpServer. Not EmitTranslatedJson — that
+        // would delete root, which this function already does below.
+        if (on_incoming_json_ != nullptr) {
+            on_incoming_json_(root);
         }
     } else {
         // `dashboard` has no UI yet, and the agents SDK injects its own
