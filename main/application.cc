@@ -17,7 +17,9 @@
 #include <driver/gpio.h>
 #include <esp_log.h>
 #ifdef CONFIG_APOLLO_PROTOCOL
+#include <esp_app_desc.h>
 #include <esp_netif_sntp.h>
+#include <wifi_manager.h>
 #endif
 #include <arpa/inet.h>
 #include <cJSON.h>
@@ -41,6 +43,7 @@ static constexpr int kChannelReopenIntervalSeconds = 10;
 // long one, so a quiet tail costs nothing but a real one still gets through.
 static constexpr int kListenFlushAttempts = 6;
 static constexpr int kListenFlushWaitMs = 40;
+static constexpr int kTelemetryIntervalSeconds = 60;
 #endif
 
 Application::Application() {
@@ -321,6 +324,7 @@ void Application::Run() {
                 // Anything but idle is the device working for the user.
                 NoteUserActivity();
             }
+            MaybeSendTelemetry();
 #endif
 
 #if defined(CONFIG_APOLLO_PROTOCOL) && defined(CONFIG_USE_EMOTE_MESSAGE_STYLE)
@@ -342,6 +346,47 @@ void Application::Run() {
             }
         }
     }
+}
+
+void Application::MaybeSendTelemetry() {
+#ifdef CONFIG_APOLLO_PROTOCOL
+    if (protocol_ == nullptr || !protocol_->IsAudioChannelOpened()) {
+        telemetry_sent_since_open_ = false;
+        return;
+    }
+
+    auto& board = Board::GetInstance();
+    DeviceTelemetry telemetry;
+    int battery_level = 0;
+    bool charging = false;
+    bool discharging = false;
+    if (board.GetBatteryLevel(battery_level, charging, discharging)) {
+        telemetry.battery_level = battery_level;
+        telemetry.battery_valid = true;
+        telemetry.charging = charging;
+        telemetry.charging_valid = true;
+    }
+    telemetry.volume = board.GetAudioCodec()->output_volume();
+    telemetry.wifi_rssi = WifiManager::GetInstance().GetRssi();
+    telemetry.firmware_version = esp_app_get_description()->version;
+
+    bool is_first_since_open = !telemetry_sent_since_open_;
+    bool is_interval_due = clock_ticks_ - last_telemetry_ticks_ >= kTelemetryIntervalSeconds;
+    // A charging edge jumps the queue: waiting a minute to learn the cable was
+    // plugged or pulled makes the server's reactions feel broken.
+    bool did_charging_flip = !is_first_since_open && telemetry.charging_valid &&
+                             telemetry.charging != last_reported_charging_;
+    if (!is_first_since_open && !is_interval_due && !did_charging_flip) {
+        return;
+    }
+
+    telemetry_sent_since_open_ = true;
+    last_telemetry_ticks_ = clock_ticks_;
+    if (telemetry.charging_valid) {
+        last_reported_charging_ = telemetry.charging;
+    }
+    protocol_->SendTelemetry(telemetry);
+#endif
 }
 
 void Application::HandleNetworkConnectedEvent() {

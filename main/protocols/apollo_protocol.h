@@ -38,6 +38,7 @@ public:
     void SendAbortSpeaking(AbortReason reason) override;
     void SendWakeWordDetected(const std::string& wake_word) override;
     void SendGesture(const std::string& gesture) override;
+    void SendTelemetry(const DeviceTelemetry& telemetry) override;
 
 private:
     std::unique_ptr<WebSocket> websocket_;
@@ -53,6 +54,7 @@ private:
     // instead of doing their usual job.
     bool confirm_pending_ = false;
     size_t turn_audio_bytes_ = 0;  // PCM actually sent since the turn started
+    bool listen_started_by_hold_ = true;
 
     bool SendText(const std::string& text) override;
     bool SendEvent(const char* type);

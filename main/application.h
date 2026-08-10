@@ -151,6 +151,9 @@ private:
     bool is_screen_asleep_ = false;
     int last_channel_attempt_ticks_ = -1000;  // Rate-limits idle channel reopening
     int clock_ticks_ = 0;
+    int last_telemetry_ticks_ = 0;
+    bool last_reported_charging_ = false;
+    bool telemetry_sent_since_open_ = false;
     TaskHandle_t activation_task_handle_ = nullptr;
 
 
@@ -163,6 +166,7 @@ private:
     void HandleNetworkDisconnectedEvent();
     void HandleActivationDoneEvent();
     void HandleWakeWordDetectedEvent();
+    void MaybeSendTelemetry();
     void ContinueOpenAudioChannel(ListeningMode mode);
     void BeginWakeWordInvoke(const std::string& wake_word);
     void ContinueWakeWordInvoke(const std::string& wake_word);

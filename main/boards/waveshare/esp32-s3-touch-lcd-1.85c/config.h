@@ -8,6 +8,15 @@
 
 #define BOOT_BUTTON_GPIO        GPIO_NUM_0
 
+// From the ESP32-S3-Touch-LCD-1.85C schematic: BAT feeds BAT_ADC(GPIO8)
+// through a 200K over 100K divider. The charger's STAT pin only drives the
+// green LED, so there is no GPIO that reads charging state.
+#define BATTERY_ADC_UNIT        ADC_UNIT_1
+#define BATTERY_ADC_CHANNEL     ADC_CHANNEL_7
+#define BATTERY_UPPER_RESISTOR  200000.0f
+#define BATTERY_LOWER_RESISTOR  100000.0f
+#define BATTERY_CHARGING_PIN    GPIO_NUM_NC
+
 #ifdef CONFIG_VERSION_1_0
 #define AUDIO_INPUT_SAMPLE_RATE  16000
 #define AUDIO_OUTPUT_SAMPLE_RATE 24000

@@ -36,6 +36,16 @@ struct BinaryProtocol3 {
 
 enum AbortReason { kAbortReasonNone, kAbortReasonWakeWordDetected };
 
+struct DeviceTelemetry {
+    int battery_level = 0;
+    bool battery_valid = false;
+    bool charging = false;
+    bool charging_valid = false;
+    int volume = 0;
+    int wifi_rssi = 0;
+    const char* firmware_version = nullptr;
+};
+
 enum ListeningMode {
     kListeningModeAutoStop,
     kListeningModeManualStop,
@@ -71,6 +81,8 @@ public:
     // Touch gestures have no xiaozhi equivalent, so this is a no-op unless the
     // protocol in use understands them.
     virtual void SendGesture(const std::string& gesture) { (void)gesture; }
+    // Same story as gestures: only Apollo has a telemetry message.
+    virtual void SendTelemetry(const DeviceTelemetry& telemetry) { (void)telemetry; }
 
 protected:
     std::function<void(const cJSON* root)> on_incoming_json_;

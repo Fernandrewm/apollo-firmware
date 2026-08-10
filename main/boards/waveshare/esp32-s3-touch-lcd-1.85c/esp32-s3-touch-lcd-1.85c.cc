@@ -7,6 +7,7 @@
 #endif
 #include "system_reset.h"
 #include "application.h"
+#include "adc_battery_monitor.h"
 #include "button.h"
 #include "config.h"
 
@@ -647,6 +648,18 @@ public:
     virtual Backlight* GetBacklight() override {
         static PwmBacklight backlight(DISPLAY_BACKLIGHT_PIN, DISPLAY_BACKLIGHT_OUTPUT_INVERT);
         return &backlight;
+    }
+
+    virtual bool GetBatteryLevel(int& level, bool& charging, bool& discharging) override {
+        // No charge-status GPIO on this board, so the estimation library infers
+        // charging from the voltage trend.
+        static AdcBatteryMonitor battery_monitor(BATTERY_ADC_UNIT, BATTERY_ADC_CHANNEL,
+                                                 BATTERY_UPPER_RESISTOR, BATTERY_LOWER_RESISTOR,
+                                                 BATTERY_CHARGING_PIN);
+        level = battery_monitor.GetBatteryLevel();
+        charging = battery_monitor.IsCharging();
+        discharging = battery_monitor.IsDischarging();
+        return true;
     }
 };
 

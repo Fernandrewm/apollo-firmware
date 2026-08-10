@@ -51,6 +51,24 @@ const char* MapApolloEmotion(const char* apollo_emotion) {
 
 uint32_t NowMilliseconds() { return (uint32_t)(esp_timer_get_time() / 1000); }
 
+// The wire carries logical effect names so the server can re-purpose sounds
+// without a flash; only this table knows which flash asset each name means.
+std::string_view MapEffectNameToSound(const char* effect_name) {
+    if (strcmp(effect_name, "ding") == 0) {
+        return Lang::Sounds::OGG_SUCCESS;
+    }
+    if (strcmp(effect_name, "chime") == 0) {
+        return Lang::Sounds::OGG_POPUP;
+    }
+    if (strcmp(effect_name, "error") == 0) {
+        return Lang::Sounds::OGG_EXCLAMATION;
+    }
+    if (strcmp(effect_name, "low_battery") == 0) {
+        return Lang::Sounds::OGG_LOW_BATTERY;
+    }
+    return {};
+}
+
 }  // namespace
 
 ApolloProtocol::ApolloProtocol() {}
@@ -119,7 +137,8 @@ void ApolloProtocol::SendStartListening(ListeningMode mode) {
     // Apollo distinguishes a held button from a wake word, and resets its audio
     // buffer on either.
     turn_audio_bytes_ = 0;
-    SendEvent(mode == kListeningModeManualStop ? "hold_start" : "wake");
+    listen_started_by_hold_ = mode == kListeningModeManualStop;
+    SendEvent(listen_started_by_hold_ ? "hold_start" : "wake");
 }
 
 void ApolloProtocol::SendStopListening() {
@@ -128,7 +147,7 @@ void ApolloProtocol::SendStopListening() {
     // "the audio never left the device".
     ESP_LOGI(TAG, "Turn audio sent: %u bytes (%.2f s)", (unsigned)turn_audio_bytes_,
              turn_audio_bytes_ / 32000.0f);
-    SendEvent("hold_end");
+    SendEvent(listen_started_by_hold_ ? "hold_end" : "audio_end");
 }
 
 void ApolloProtocol::SendWakeWordDetected(const std::string& wake_word) {
@@ -167,6 +186,34 @@ void ApolloProtocol::SendGesture(const std::string& gesture) {
     cJSON_Delete(root);
 
     ESP_LOGI(TAG, "Gesture '%s' -> %s", gesture.c_str(), message.c_str());
+    SendText(message);
+}
+
+void ApolloProtocol::SendTelemetry(const DeviceTelemetry& telemetry) {
+    if (websocket_ == nullptr || !websocket_->IsConnected()) {
+        return;
+    }
+
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "type", "telemetry");
+    if (telemetry.battery_valid) {
+        cJSON_AddNumberToObject(root, "battery", telemetry.battery_level);
+    }
+    if (telemetry.charging_valid) {
+        cJSON_AddBoolToObject(root, "charging", telemetry.charging);
+    }
+    cJSON_AddNumberToObject(root, "volume", telemetry.volume);
+    cJSON_AddNumberToObject(root, "wifiRssi", telemetry.wifi_rssi);
+    if (telemetry.firmware_version != nullptr) {
+        cJSON_AddStringToObject(root, "firmwareVersion", telemetry.firmware_version);
+    }
+    cJSON_AddNumberToObject(root, "ts", NowMilliseconds());
+
+    auto serialized = cJSON_PrintUnformatted(root);
+    std::string message(serialized);
+    cJSON_free(serialized);
+    cJSON_Delete(root);
+
     SendText(message);
 }
 
@@ -357,6 +404,19 @@ void ApolloProtocol::HandleIncomingJson(const char* data, size_t len) {
         if (cJSON_IsString(summary)) {
             confirm_pending_ = true;
             EmitAlert("Tocá para confirmar", summary->valuestring, "confused");
+        }
+    } else if (strcmp(type->valuestring, "play_effect") == 0) {
+        auto name = cJSON_GetObjectItem(root, "name");
+        if (cJSON_IsString(name)) {
+            auto sound = MapEffectNameToSound(name->valuestring);
+            if (sound.empty()) {
+                ESP_LOGW(TAG, "Unknown effect: %s", name->valuestring);
+            } else {
+                // This runs on the websocket task; playback goes through the
+                // main task, which owns the audio service.
+                Application::GetInstance().Schedule(
+                    [sound]() { Application::GetInstance().PlaySound(sound); });
+            }
         }
     } else {
         // `dashboard` has no UI yet, and the agents SDK injects its own
