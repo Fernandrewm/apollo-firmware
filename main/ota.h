@@ -30,6 +30,7 @@ public:
     const std::string& GetActivationMessage() const { return activation_message_; }
     const std::string& GetActivationCode() const { return activation_code_; }
     std::string GetCheckVersionUrl();
+    void SetCheckVersionUrl(const std::string& url) { check_version_url_override_ = url; }
 
 private:
     std::string activation_message_;
@@ -44,6 +45,7 @@ private:
     std::string current_version_;
     std::string firmware_version_;
     std::string firmware_url_;
+    std::string check_version_url_override_;
     std::string activation_challenge_;
     std::string serial_number_;
     int activation_timeout_ms_ = 30000;
