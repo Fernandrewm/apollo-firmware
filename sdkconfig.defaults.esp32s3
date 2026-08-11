@@ -17,9 +17,19 @@ CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=16
 CONFIG_MBEDTLS_DYNAMIC_FREE_CONFIG_DATA=y
 
 CONFIG_ESP32S3_INSTRUCTION_CACHE_32KB=y
+CONFIG_ESP32S3_DATA_CACHE_64KB=y
 CONFIG_ESP32S3_DATA_CACHE_LINE_64B=y
 
+# -O2: the LVGL/emote/TFLM hot paths are compiled code, and the app slot
+# has more than a megabyte of slack to trade for speed.
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+
 CONFIG_SR_WN_WN9_NIHAOXIAOZHI_TTS=y
+
+CONFIG_USE_MICRO_WAKE_WORD=y
+# The current "Hey, Apólo" model evaluates at ~68% recall; 50 is its usable
+# operating point. Raise toward 90 when a stronger model lands.
+CONFIG_MICRO_WAKE_WORD_PROBABILITY_CUTOFF=50
 
 CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096
 
