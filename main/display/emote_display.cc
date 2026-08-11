@@ -28,6 +28,7 @@
 #include "assets/lang_config.h"
 #include "assets.h"
 #include "board.h"
+#include "confirm_geometry.h"
 #include "gfx.h"
 #include "expression_emote.h"
 
@@ -65,6 +66,10 @@ static bool OnFlushIoReady(const esp_lcd_panel_io_handle_t panel_io,
 // flush. Stored pre-byte-swapped because the engine renders with swap=true.
 // White (0xFFFF) is the resting color until the server names the active mode.
 static std::atomic<uint16_t> s_accent_ring_color{0xFFFF};
+// The confirm screen hides the ring: it is painted into every flushed stripe
+// regardless of what the engine rendered, so this flag is the only way a
+// takeover can claim the full circle.
+static std::atomic<bool> s_accent_ring_visible{true};
 static int s_display_width = 0;
 static int s_display_height = 0;
 constexpr float kAccentRingThickness = 8.0f;
@@ -72,6 +77,9 @@ constexpr float kAccentRingThickness = 8.0f;
 static void OverlayAccentRing(int x_start, int y_start, int x_end, int y_end, uint16_t* pixels)
 {
     if (s_display_width == 0 || s_display_height == 0) {
+        return;
+    }
+    if (!s_accent_ring_visible.load(std::memory_order_relaxed)) {
         return;
     }
     const uint16_t color = s_accent_ring_color.load(std::memory_order_relaxed);
@@ -190,6 +198,9 @@ EmoteDisplay::~EmoteDisplay()
 void EmoteDisplay::SetEmotion(const char* const emotion)
 {
     ESP_LOGI(TAG, "SetEmotion: %s", emotion);
+    if (confirm_screen_active_) {
+        return;
+    }
     if (emote_handle_ && emotion && strlen(emotion) > 0) {
         emote_set_anim_emoji(emote_handle_, emotion);
     }
@@ -198,6 +209,9 @@ void EmoteDisplay::SetEmotion(const char* const emotion)
 void EmoteDisplay::SetChatMessage(const char* const role, const char* const content)
 {
     ESP_LOGI(TAG, "SetChatMessage: %s, %s", role, content);
+    if (confirm_screen_active_) {
+        return;
+    }
     if (emote_handle_ && content && strlen(content) > 0) {
         if ((std::strcmp(role, "system") == 0) && std::strstr(content, "xiaozhi.me")) {
             size_t len = strlen(content);
@@ -215,6 +229,9 @@ void EmoteDisplay::SetChatMessage(const char* const role, const char* const cont
 void EmoteDisplay::SetStatus(const char* const status)
 {
     ESP_LOGI(TAG, "SetStatus: %s", status);
+    if (confirm_screen_active_) {
+        return;
+    }
     if (emote_handle_ && status && strlen(status) > 0) {
         if (std::strcmp(status, Lang::Strings::LISTENING) == 0) {
             emote_set_event_msg(emote_handle_, EMOTE_MGR_EVT_LISTEN, NULL);
@@ -284,6 +301,105 @@ void EmoteDisplay::SetAccentColor(const char* const color)
     // The engine only re-flushes dirty areas and the screen border belongs to
     // none of them, so a color change has to invalidate everything or the ring
     // keeps its old color until the next full redraw.
+    RefreshAll();
+}
+
+bool EmoteDisplay::EnsureConfirmObjects()
+{
+    if (confirm_objects_created_) {
+        return true;
+    }
+    if (!emote_handle_) {
+        return false;
+    }
+
+    gfx_obj_t* summary_label =
+        emote_create_obj_by_type(emote_handle_, EMOTE_OBJ_TYPE_LABEL, "confirm_text");
+    gfx_obj_t* approve_button =
+        emote_create_obj_by_type(emote_handle_, EMOTE_OBJ_TYPE_LABEL, "confirm_yes");
+    gfx_obj_t* reject_button =
+        emote_create_obj_by_type(emote_handle_, EMOTE_OBJ_TYPE_LABEL, "confirm_no");
+    if (!summary_label || !approve_button || !reject_button) {
+        ESP_LOGE(TAG, "Could not create confirm screen objects");
+        return false;
+    }
+
+    emote_lock(emote_handle_);
+    gfx_obj_align(summary_label, GFX_ALIGN_TOP_MID, 0, confirm_geometry::kSummaryOffsetY);
+    gfx_obj_set_size(summary_label, confirm_geometry::kSummaryWidth,
+                     confirm_geometry::kSummaryHeight);
+    gfx_label_set_color(summary_label, GFX_COLOR_HEX(confirm_geometry::kSummaryTextColor));
+    // The configurator default is SCROLL; a prompt the user must judge has to
+    // hold still.
+    gfx_label_set_long_mode(summary_label, GFX_LABEL_LONG_WRAP);
+
+    gfx_obj_align(approve_button, GFX_ALIGN_TOP_LEFT, confirm_geometry::kApproveButtonOffsetX,
+                  confirm_geometry::kButtonOffsetY);
+    gfx_obj_set_size(approve_button, confirm_geometry::kButtonWidth,
+                     confirm_geometry::kButtonHeight);
+    gfx_label_set_text(approve_button, "Sí");
+    gfx_label_set_color(approve_button, GFX_COLOR_HEX(confirm_geometry::kButtonTextColor));
+    gfx_label_set_bg_color(approve_button,
+                           GFX_COLOR_HEX(confirm_geometry::kApproveBackgroundColor));
+    gfx_label_set_bg_enable(approve_button, true);
+    gfx_label_set_long_mode(approve_button, GFX_LABEL_LONG_CLIP);
+
+    gfx_obj_align(reject_button, GFX_ALIGN_TOP_LEFT, confirm_geometry::kRejectButtonOffsetX,
+                  confirm_geometry::kButtonOffsetY);
+    gfx_obj_set_size(reject_button, confirm_geometry::kButtonWidth,
+                     confirm_geometry::kButtonHeight);
+    gfx_label_set_text(reject_button, "No");
+    gfx_label_set_color(reject_button, GFX_COLOR_HEX(confirm_geometry::kButtonTextColor));
+    gfx_label_set_bg_color(reject_button,
+                           GFX_COLOR_HEX(confirm_geometry::kRejectBackgroundColor));
+    gfx_label_set_bg_enable(reject_button, true);
+    gfx_label_set_long_mode(reject_button, GFX_LABEL_LONG_CLIP);
+
+    // emote_create_obj_by_type leaves custom objects visible.
+    gfx_obj_set_visible(summary_label, false);
+    gfx_obj_set_visible(approve_button, false);
+    gfx_obj_set_visible(reject_button, false);
+    emote_unlock(emote_handle_);
+
+    confirm_objects_created_ = true;
+    return true;
+}
+
+void EmoteDisplay::ShowConfirmScreen(const char* summary)
+{
+    ESP_LOGI(TAG, "ShowConfirmScreen: %s", summary ? summary : "(null)");
+    if (!EnsureConfirmObjects()) {
+        return;
+    }
+
+    gfx_obj_t* summary_label = emote_get_obj_by_name(emote_handle_, "confirm_text");
+    emote_lock(emote_handle_);
+    gfx_label_set_text(summary_label, summary ? summary : "");
+    emote_unlock(emote_handle_);
+
+    confirm_screen_active_ = true;
+    s_accent_ring_visible.store(false, std::memory_order_relaxed);
+    emote_set_anim_visible(emote_handle_, false);
+    emote_set_obj_visible(emote_handle_, EMT_DEF_ELEM_LISTEN_ANIM, false);
+    emote_set_obj_visible(emote_handle_, EMT_DEF_ELEM_TOAST_LABEL, false);
+    emote_set_obj_visible(emote_handle_, "confirm_text", true);
+    emote_set_obj_visible(emote_handle_, "confirm_yes", true);
+    emote_set_obj_visible(emote_handle_, "confirm_no", true);
+    RefreshAll();
+}
+
+void EmoteDisplay::HideConfirmScreen()
+{
+    ESP_LOGI(TAG, "HideConfirmScreen");
+    if (!emote_handle_ || !confirm_objects_created_) {
+        return;
+    }
+    confirm_screen_active_ = false;
+    s_accent_ring_visible.store(true, std::memory_order_relaxed);
+    emote_set_obj_visible(emote_handle_, "confirm_text", false);
+    emote_set_obj_visible(emote_handle_, "confirm_yes", false);
+    emote_set_obj_visible(emote_handle_, "confirm_no", false);
+    emote_set_anim_visible(emote_handle_, true);
     RefreshAll();
 }
 
