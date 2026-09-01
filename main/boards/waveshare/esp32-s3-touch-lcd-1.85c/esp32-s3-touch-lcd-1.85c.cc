@@ -19,6 +19,7 @@
 #include <esp_lcd_panel_ops.h>
 #include <esp_lcd_st77916.h>
 #include <esp_timer.h>
+#include <cstring>
 #include "esp_io_expander_tca9554.h"
 #ifdef CONFIG_APOLLO_PROTOCOL
 #include <esp_lcd_touch_cst816s.h>
@@ -384,6 +385,7 @@ private:
 
     esp_lcd_touch_handle_t touch_handle_ = nullptr;
     esp_lcd_panel_io_handle_t touch_io_handle_ = nullptr;
+    int last_nonzero_volume_ = 10;
 
     // The CST816 drops into standby after two seconds without a touch and stops
     // answering I2C entirely, which reads as a dead controller. Register 0xFE
@@ -594,6 +596,47 @@ private:
 
     void EmitGesture(const char* gesture) {
         ESP_LOGI(TAG, "Touch gesture: %s", gesture);
+
+        if (strcmp(gesture, "swipe_left") == 0 || strcmp(gesture, "swipe_right") == 0 ||
+            strcmp(gesture, "double_tap") == 0) {
+            std::string volume_gesture(gesture);
+            Application::GetInstance().Schedule([this, volume_gesture]() {
+                auto codec = GetAudioCodec();
+                int volume = codec->output_volume();
+
+                if (volume_gesture == "double_tap") {
+                    if (volume > 0) {
+                        last_nonzero_volume_ = volume;
+                        volume = 0;
+                    } else {
+                        volume = last_nonzero_volume_ > 0 ? last_nonzero_volume_ : 10;
+                    }
+                } else {
+                    volume += volume_gesture == "swipe_left" ? -10 : 10;
+                    if (volume < 0) {
+                        volume = 0;
+                    } else if (volume > 100) {
+                        volume = 100;
+                    }
+                    if (volume > 0) {
+                        last_nonzero_volume_ = volume;
+                    }
+                }
+
+                codec->SetOutputVolume(volume);
+                char notification[32];
+                if (volume == 0) {
+                    snprintf(notification, sizeof(notification), "Silencio");
+                } else {
+                    snprintf(notification, sizeof(notification), "Volumen %d%%", volume);
+                }
+                if (display_ != nullptr) {
+                    display_->ShowNotification(notification);
+                }
+            });
+            return;
+        }
+
         Application::GetInstance().SendGesture(gesture);
     }
 #endif
