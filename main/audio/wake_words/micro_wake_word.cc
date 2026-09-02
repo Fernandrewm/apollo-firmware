@@ -23,6 +23,18 @@ extern "C" {
 
 #define TAG "MicroWakeWord"
 
+#ifndef EVE_MICRO_WAKE_WORD_PHRASE
+#define EVE_MICRO_WAKE_WORD_PHRASE CONFIG_MICRO_WAKE_WORD_PHRASE
+#endif
+
+#ifndef EVE_MICRO_WAKE_WORD_PROBABILITY_CUTOFF
+#define EVE_MICRO_WAKE_WORD_PROBABILITY_CUTOFF CONFIG_MICRO_WAKE_WORD_PROBABILITY_CUTOFF
+#endif
+
+#ifndef EVE_MICRO_WAKE_WORD_SLIDING_WINDOW_SIZE
+#define EVE_MICRO_WAKE_WORD_SLIDING_WINDOW_SIZE CONFIG_MICRO_WAKE_WORD_SLIDING_WINDOW_SIZE
+#endif
+
 extern const uint8_t model_start[] asm("_binary_micro_wake_word_model_tflite_start");
 extern const uint8_t model_end[] asm("_binary_micro_wake_word_model_tflite_end");
 
@@ -185,8 +197,8 @@ bool MicroWakeWord::Initialize(AudioCodec* codec, srmodel_list_t*) {
     output_scale_ = output->params.scale;
     output_zero_point_ = output->params.zero_point;
 
-    probability_cutoff_ = CONFIG_MICRO_WAKE_WORD_PROBABILITY_CUTOFF * 255 / 100;
-    window_size_ = CONFIG_MICRO_WAKE_WORD_SLIDING_WINDOW_SIZE;
+    probability_cutoff_ = EVE_MICRO_WAKE_WORD_PROBABILITY_CUTOFF * 255 / 100;
+    window_size_ = EVE_MICRO_WAKE_WORD_SLIDING_WINDOW_SIZE;
 
 #if CONFIG_SEND_WAKE_WORD_DATA
     if (!wake_word_audio_cache_.Initialize(16000 * 2)) {
@@ -195,7 +207,7 @@ bool MicroWakeWord::Initialize(AudioCodec* codec, srmodel_list_t*) {
 #endif
 
     ESP_LOGI(TAG, "Model '%s' loaded: %zu bytes, stride %d, arena %zu (%zu used), cutoff %lu/255",
-        CONFIG_MICRO_WAKE_WORD_PHRASE, model_size, stride_, arena_size,
+        EVE_MICRO_WAKE_WORD_PHRASE, model_size, stride_, arena_size,
         interpreter_->arena_used_bytes(), static_cast<unsigned long>(probability_cutoff_));
     ESP_LOGI(TAG, "Input quant scale %f zp %ld, output quant scale %f zp %ld",
         static_cast<double>(input_scale_), static_cast<long>(input_zero_point_),
@@ -329,7 +341,7 @@ void MicroWakeWord::ProcessFeatureSlice(const uint16_t* values, size_t size) {
 
     ESP_LOGI(TAG, "Wake word detected, mean probability %lu/255",
         static_cast<unsigned long>(mean));
-    last_detected_wake_word_ = CONFIG_MICRO_WAKE_WORD_PHRASE;
+    last_detected_wake_word_ = EVE_MICRO_WAKE_WORD_PHRASE;
     running_ = false;
     probabilities_.clear();
     if (wake_word_detected_callback_) {
