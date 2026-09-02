@@ -242,7 +242,10 @@ if(CONFIG_BOARD_TYPE_ESP32_P4_FUNCTION_EV_BOARD)
 endif()
 set(WAKE_WORD_MODEL_EMBED "")
 if(CONFIG_USE_MICRO_WAKE_WORD)
-    set(MICRO_WAKE_WORD_MODEL "hey_apolo.tflite" CACHE STRING "Model filename under main/assets/wakewords")
+    set(MICRO_WAKE_WORD_MODEL "hey_eve.tflite" CACHE STRING "Model filename under main/assets/wakewords")
+    set(EVE_MICRO_WAKE_WORD_PHRASE "Hey Eve" CACHE STRING "Reported phrase for the embedded micro wake word")
+    set(EVE_MICRO_WAKE_WORD_PROBABILITY_CUTOFF 95 CACHE STRING "Hey Eve probability cutoff, as a percentage")
+    set(EVE_MICRO_WAKE_WORD_SLIDING_WINDOW_SIZE 5 CACHE STRING "Hey Eve calibrated probability window size")
     # Copied to a fixed name so the embed symbol stays stable across model swaps
     configure_file(${CMAKE_CURRENT_SOURCE_DIR}/assets/wakewords/${MICRO_WAKE_WORD_MODEL}
                    ${CMAKE_CURRENT_BINARY_DIR}/micro_wake_word_model.tflite COPYONLY)
@@ -300,6 +303,9 @@ if(NOT CMAKE_BUILD_EARLY_EXPANSION)
                         PRIVATE BOARD_MANUFACTURER=\"${BOARD_MANUFACTURER}\"
                         PRIVATE BUILTIN_TEXT_FONT=${BUILTIN_TEXT_FONT} BUILTIN_ICON_FONT=${BUILTIN_ICON_FONT}
                         PRIVATE TEXT_FONT_SIZE=${TEXT_FONT_SIZE} TEXT_FONT_BPP=${TEXT_FONT_BPP}
+                        PRIVATE EVE_MICRO_WAKE_WORD_PHRASE=\"${EVE_MICRO_WAKE_WORD_PHRASE}\"
+                        PRIVATE EVE_MICRO_WAKE_WORD_PROBABILITY_CUTOFF=${EVE_MICRO_WAKE_WORD_PROBABILITY_CUTOFF}
+                        PRIVATE EVE_MICRO_WAKE_WORD_SLIDING_WINDOW_SIZE=${EVE_MICRO_WAKE_WORD_SLIDING_WINDOW_SIZE}
                         )
 endif()
 
